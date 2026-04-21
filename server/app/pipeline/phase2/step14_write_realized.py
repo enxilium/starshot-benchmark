@@ -1,10 +1,10 @@
 """
-PIPELINE.md step 15 — write a realized leaf to the state repository.
+PIPELINE.md step 14 — write a realized leaf to the state repository.
 
-Called by step 14 after the completion loop exits. Persists a
-`RealizedEntry` capturing the leaf's final object list + relationships +
-bbox so later step-6 `read_visible` calls can surface it as a completed
-reference for stylistic consistency.
+Called by step 13 after the completion loop exits. Persists a
+`RealizedEntry` capturing the leaf's final object list + relationships
++ bbox so later step-6 `read_visible` calls can surface it as a
+completed reference for stylistic consistency.
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 """
-PIPELINE.md step 12 — mesh generation via the injected `MeshGenerator`.
+PIPELINE.md step 11 — mesh generation via the injected `MeshGenerator`.
 
 Runs in bounded-concurrency parallel
 (`asyncio.Semaphore(mesh_gen_concurrency)`) since mesh generation

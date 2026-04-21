@@ -1,8 +1,8 @@
-"""PIPELINE.md step 11 — produce bounding boxes for anchor objects in topo order.
+"""PIPELINE.md step 10 — produce bounding boxes for anchor objects in topo order.
 
 The LLM receives the leaf bbox, the frames, the relationships, the
 topologically-sorted order of objects to resolve, AND the bboxes that
-have already been resolved (either from prior calls or — in the step-14
+have already been resolved (either from prior calls or — in the step-13
 incremental case — from prior completion-loop iterations). It must only
 generate bboxes for the objects in `to_resolve`, respecting the
 already-resolved ones as immovable anchors.
@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.core.types import BoundingBox
 
-STEP_ID = "step11"
+STEP_ID = "step10"
 
 SYSTEM_PROMPT = """\
 You are assigning 3D bounding boxes to anchor objects inside a leaf subscene.

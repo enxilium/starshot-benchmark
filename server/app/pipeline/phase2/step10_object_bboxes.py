@@ -1,9 +1,9 @@
 """
-PIPELINE.md step 11 — LLM-generated bboxes for anchor objects.
+PIPELINE.md step 10 — LLM-generated bboxes for anchor objects.
 
 Supports two modes:
   * Initial: `already_resolved={}`, `to_resolve=<all objects in topo order>`.
-  * Incremental (step-14 completion loop): `already_resolved=<all prior>`,
+  * Incremental (step-13 completion loop): `already_resolved=<all prior>`,
     `to_resolve=[new_object_id]`.
 
 Wraps `call_with_validator` with the shared bbox validator. Retries use
@@ -19,7 +19,7 @@ from app.core.errors import ValidationConflict
 from app.core.types import AnchorObject, BoundingBox, Frame, Relationship, SubsceneNode
 from app.geometry.bbox_validator import validate_boxes
 from app.llm.client import PriorAttempt, PromptPayload, call_with_validator
-from app.llm.prompts.phase2_step11_object_bboxes import (
+from app.llm.prompts.phase2_step10_object_bboxes import (
     STEP_ID,
     SYSTEM_PROMPT,
     Output,
@@ -68,7 +68,7 @@ async def run(
             missing = sorted(expected - got)
             extras = sorted(got - expected)
             return ValidationConflict(
-                validator="step11_coverage",
+                validator="step10_coverage",
                 detail=(
                     f"assignments mismatch: expected ids {sorted(expected)}, "
                     f"got {sorted(got)} (missing={missing}, extras={extras})"

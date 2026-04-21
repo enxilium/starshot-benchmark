@@ -1,5 +1,5 @@
 """
-PIPELINE.md step 13 — rescale.
+PIPELINE.md step 12 — rescale.
 
 Given a generated mesh and the target `BoundingBox` resolved for its
 anchor object, apply a uniform scale so the mesh's maximal dimension

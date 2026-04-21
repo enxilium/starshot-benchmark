@@ -1,8 +1,8 @@
 """
-PIPELINE.md step 17 — publish the assembled scene as a `.glb` on disk
+PIPELINE.md step 16 — publish the assembled scene as a `.glb` on disk
 and return the URL the API will serve it at.
 
-Takes the `trimesh.Scene` produced by step 16, exports it to
+Takes the `trimesh.Scene` produced by step 15, exports it to
 `{runs_dir}/{run_id}/scene.glb` via `trimesh.Scene.export('glb')`, and
 returns `(path, "/glb/{run_id}")`. The URL propagates up through step 3
 into `RunCompleted` and into the `run.json` summary.
@@ -36,7 +36,7 @@ def publish(run_id: str, scene: trimesh.Scene) -> tuple[Path, str]:
     """Write `scene` to disk and return `(path, url)`.
 
     The URL is a relative path that the `GET /glb/{run_id}` endpoint
-    (step 18) resolves.
+    (step 17) resolves.
     """
     path = glb_path_for(run_id)
     write_glb(scene, path)

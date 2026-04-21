@@ -1,20 +1,20 @@
 """
-PIPELINE.md step 14 — the completion loop + phase-2 per-leaf driver.
+PIPELINE.md step 13 — the completion loop + phase-2 per-leaf driver.
 
 Owns two things:
 
   * `_propose_one` — one structured LLM call that asks the model for
     EXACTLY ONE more object (or `stop=True`). No retry.
   * `generate_leaf` — the per-leaf driver that sequences phase-2 steps
-    10 → 11 → 12 → 13, then loops `_propose_one` + incremental 11/12/13
-    (step 14 body proper), and finally calls step 15 to persist the
+    9 → 10 → 11 → 12, then loops `_propose_one` + incremental 10/11/12
+    (step 13 body proper), and finally calls step 14 to persist the
     realized entry.
 
 The LLM propose call itself does NOT retry under a validator. If the
 proposal is structurally broken (cycle, contradiction, unknown target,
 ...), the loop breaks rather than re-asking. If the incremental bbox
 step fails repeatedly under `ctx.max_retries`, that surfaces a
-`RetryExhausted` from inside step 11, which fails the whole run.
+`RetryExhausted` from inside step 10, which fails the whole run.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from app.core.events import PhaseStarted, StepCompleted, StepStarted
 from app.core.types import AnchorObject, Frame, Relationship, SubsceneNode
 from app.geometry.relationship_graph import GraphResult, validate_and_sort
 from app.llm.client import PromptPayload
-from app.llm.prompts.phase2_step14_completion_loop import (
+from app.llm.prompts.phase2_step13_completion_loop import (
     STEP_ID,
     SYSTEM_PROMPT,
     Output,
@@ -36,11 +36,11 @@ from app.llm.prompts.phase2_step14_completion_loop import (
 )
 
 from . import (
-    step10_anchor_objects,
-    step11_object_bboxes,
-    step12_mesh_generation,
-    step13_rescale,
-    step15_write_realized,
+    step09_anchor_objects,
+    step10_object_bboxes,
+    step11_mesh_generation,
+    step12_rescale,
+    step14_write_realized,
 )
 from .frame_summary import summarize_frames
 
@@ -94,53 +94,53 @@ async def generate_leaf(*, leaf: SubsceneNode, frames: list[Frame]) -> Generated
     ctx = current()
     await ctx.events.emit(PhaseStarted(phase="phase2", scope_id=leaf.scope_id))
 
-    # ---- Step 10: anchor objects + graph validator -------------------------
-    await ctx.events.emit(StepStarted(step_id="step10"))
-    step10 = await step10_anchor_objects.run(leaf=leaf, frames=frames)
+    # ---- Step 9: anchor objects + graph validator -------------------------
+    await ctx.events.emit(StepStarted(step_id="step09"))
+    anchors = await step09_anchor_objects.run(leaf=leaf, frames=frames)
     await ctx.events.emit(
         StepCompleted(
-            step_id="step10",
+            step_id="step09",
             duration_ms=0.0,
             output_summary={
-                "n_objects": len(step10.objects),
-                "n_relationships": len(step10.relationships),
+                "n_objects": len(anchors.objects),
+                "n_relationships": len(anchors.relationships),
             },
         )
     )
 
-    # ---- Step 11: object bbox generation (initial) -------------------------
-    await ctx.events.emit(StepStarted(step_id="step11"))
-    bboxes = await step11_object_bboxes.run(
+    # ---- Step 10: object bbox generation (initial) ------------------------
+    await ctx.events.emit(StepStarted(step_id="step10"))
+    bboxes = await step10_object_bboxes.run(
         leaf=leaf,
         frames=frames,
-        objects=step10.objects,
-        relationships=step10.relationships,
-        topo_order=step10.graph.order,
+        objects=anchors.objects,
+        relationships=anchors.relationships,
+        topo_order=anchors.graph.order,
         already_resolved={},
-        to_resolve=step10.graph.order,
+        to_resolve=anchors.graph.order,
     )
     await ctx.events.emit(
         StepCompleted(
-            step_id="step11",
+            step_id="step10",
             duration_ms=0.0,
             output_summary={"n_bboxes": len(bboxes)},
         )
     )
 
     objects_with_bboxes = [
-        obj.model_copy(update={"bbox": bboxes[obj.id]}) for obj in step10.objects
+        obj.model_copy(update={"bbox": bboxes[obj.id]}) for obj in anchors.objects
     ]
 
-    # ---- Steps 12 + 13: mesh gen and rescale -------------------------------
-    meshes_raw = await step12_mesh_generation.run(objects=objects_with_bboxes)
+    # ---- Steps 11 + 12: mesh gen and rescale ------------------------------
+    meshes_raw = await step11_mesh_generation.run(objects=objects_with_bboxes)
     meshes: dict[str, trimesh.Trimesh] = {
-        oid: step13_rescale.rescale_mesh_to_bbox(mesh, bboxes[oid])
+        oid: step12_rescale.rescale_mesh_to_bbox(mesh, bboxes[oid])
         for oid, mesh in meshes_raw.items()
     }
 
-    # ---- Step 14: completion loop ------------------------------------------
+    # ---- Step 13: completion loop -----------------------------------------
     placed = list(objects_with_bboxes)
-    all_rels = list(step10.relationships)
+    all_rels = list(anchors.relationships)
 
     while True:
         proposal = await _propose_one(
@@ -153,7 +153,7 @@ async def generate_leaf(*, leaf: SubsceneNode, frames: list[Frame]) -> Generated
         candidate_objects = [*placed, new_obj]
         candidate_rels = [*all_rels, *proposal.new_relationships]
 
-        # Re-run step 10's graph validator on the candidate graph. A rejected
+        # Re-run step 9's graph validator on the candidate graph. A rejected
         # proposal means the LLM produced something structurally wrong; break
         # rather than loop (we'd just get the same bad proposal again).
         frame_ids = {f.id for f in frames}
@@ -165,8 +165,8 @@ async def generate_leaf(*, leaf: SubsceneNode, frames: list[Frame]) -> Generated
         if not isinstance(graph_check, GraphResult):
             break
 
-        # Step 11 in incremental mode: resolve only the new object's bbox.
-        incr = await step11_object_bboxes.run(
+        # Step 10 in incremental mode: resolve only the new object's bbox.
+        incr = await step10_object_bboxes.run(
             leaf=leaf,
             frames=frames,
             objects=candidate_objects,
@@ -178,17 +178,17 @@ async def generate_leaf(*, leaf: SubsceneNode, frames: list[Frame]) -> Generated
         bboxes = {**bboxes, **incr}
         new_obj_bbox = new_obj.model_copy(update={"bbox": bboxes[new_obj.id]})
 
-        # Steps 12 + 13 for just the new object.
-        new_meshes = await step12_mesh_generation.run(objects=[new_obj_bbox])
-        meshes[new_obj.id] = step13_rescale.rescale_mesh_to_bbox(
+        # Steps 11 + 12 for just the new object.
+        new_meshes = await step11_mesh_generation.run(objects=[new_obj_bbox])
+        meshes[new_obj.id] = step12_rescale.rescale_mesh_to_bbox(
             new_meshes[new_obj.id], bboxes[new_obj.id]
         )
 
         placed.append(new_obj_bbox)
         all_rels = candidate_rels
 
-    # ---- Step 15: persist realized + return --------------------------------
-    await step15_write_realized.write_realized(
+    # ---- Step 14: persist realized + return -------------------------------
+    await step14_write_realized.write_realized(
         leaf=leaf, placed=placed, relationships=all_rels
     )
 

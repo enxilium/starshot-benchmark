@@ -1,4 +1,4 @@
-"""PIPELINE.md step 14 — the completion loop. Emit ONE more object or stop."""
+"""PIPELINE.md step 13 — the completion loop. Emit ONE more object or stop."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.core.types import BoundingBox, Relationship
 
-STEP_ID = "step14"
+STEP_ID = "step13"
 
 SYSTEM_PROMPT = """\
 You are iteratively completing a leaf subscene. You have already placed a \

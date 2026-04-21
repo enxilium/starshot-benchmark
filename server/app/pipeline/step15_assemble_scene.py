@@ -1,5 +1,5 @@
 """
-PIPELINE.md step 16 — assemble every leaf mesh + every frame into a
+PIPELINE.md step 15 — assemble every leaf mesh + every frame into a
 single `trimesh.Scene`.
 
 Each object mesh and each frame is added as a named geometry so
@@ -8,7 +8,7 @@ fields from `AnchorObject` / `Frame`). Frames are converted to meshes
 deterministically via `geometry.frames.frame_to_mesh`.
 
 Coordinate convention: Y-up, right-handed, meters. trimesh's GLB export
-(step 17) writes Y-up natively, matching glTF 2.0.
+(step 16) writes Y-up natively, matching glTF 2.0.
 """
 
 from __future__ import annotations

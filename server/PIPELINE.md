@@ -62,19 +62,20 @@ written into `run.json`.
 
 ## 3. Orchestrator top level
 
-**Location:** `server/app/pipeline/step03_orchestrator.py:68`
+**Location:** `server/app/pipeline/step03_orchestrator.py:69`
 
 **Input:** `(user_prompt: str, model_id: str)`
 
-Emits `RunStarted`, then runs the three stages below sequentially:
+Emits `RunStarted`, then runs two stages:
 
-1. **Divide** (step 4): `root = await divider.divide(user_prompt)` →
-   `SubsceneNode` tree.
-2. **Generate per leaf** (step 9): iterate `collect_leaves(root)` in
-   depth-first order; for each leaf resolve its ancestor frame chain with
-   `collect_frames_for_leaf` and call `generator.generate_leaf(...)`.
-3. **Assemble + publish** (steps 16–17): flatten meshes + frames, export
-   GLB.
+1. **Divide + realize** (steps 4-14 interleaved): call
+   `step08_recurse.divide(user_prompt)`. It runs step 4 once at the
+   root, then descends. As the DFS recursion hits each atomic leaf it
+   fires the full phase 2 (steps 9 → 10 → 11 → 12 → 13 loop → 14) on
+   that leaf **before unwinding**. Returns `(root, generated_leaves)`
+   with the tree plus the `GeneratedLeaf`s in DFS order.
+2. **Assemble + publish** (steps 15-16): flatten meshes + frames,
+   export GLB.
 
 Emits `RunCompleted(glb_url, total_duration_ms, retry_summary)` on
 success, `RunFailed` on exception.
@@ -111,7 +112,7 @@ The bbox is wrapped into the root node:
 ```python
 root = SubsceneNode(scope_id="root", prompt=user_prompt, bbox=overall_bbox, high_level_plan="")
 ```
-and `_recurse(root)` is called (which runs steps 5–8 on each node).
+and `_recurse(root)` is called (which runs steps 5-8 on each node).
 
 ---
 
@@ -175,8 +176,9 @@ Helper: `server/app/llm/client.py:54`.
 **Output:** `Output(is_atomic: bool, subscenes: list[SubsceneSpec])`.
 Each spec carries `(scope_id, prompt, bbox, high_level_plan)`.
 
-If `is_atomic`, the node's recursion terminates here (no step 7, no
-step 8). Otherwise proceed to step 7.
+If `is_atomic`, the node's recursion terminates at step 6 for non-leaf
+processing (step 7 is skipped); then, inside step 8's atomic branch,
+phase 2 fires on this leaf. Otherwise proceed to step 7.
 
 ---
 
@@ -194,40 +196,39 @@ Writing **before** recursing is what lets a sibling's later step 6 call
 
 ---
 
-## 8. Recurse into each child → step 5
+## 8. Recurse into each child → step 5 (and fire phase 2 on leaves)
 
-**Location:** `server/app/pipeline/phase1/step08_recurse.py:44` (the
-`_recurse` body; the public `divide()` entry is at `:31`).
+**Location:** `server/app/pipeline/phase1/step08_recurse.py` (`_recurse`
+body at `:76`; the public `divide()` entry is at `:47`).
 
 For each spec, construct a child
 `SubsceneNode(scope_id, prompt, bbox, high_level_plan)` and re-enter the
-recursion: run **steps 5 → 6 → (7 → 8) or stop** on the child. Append it
-to `node.children`.
+recursion. Two flavors, depending on what step 6 returned for the child:
 
-Once the root's recursion unwinds, the orchestrator has the fully
-populated `SubsceneNode` tree.
+- **Non-atomic child:** run **steps 5 → 6 → 7 → 8** on the child.
+- **Atomic child:** mark `is_atomic=True`, then — this is the
+  interleaving point — run the **entire phase 2** on the child in
+  place: step 13's `generate_leaf` drives steps 9 → 10 → 11 → 12 → 13
+  loop → 14 on the leaf and returns a `GeneratedLeaf`, which is
+  appended to the orchestrator's result list. This all happens
+  **before** the recursion unwinds.
+
+Appending to `node.children` happens after the recursive call returns.
+
+The interleaving matters because step 14 writes a `RealizedEntry` to
+the state repo. The next sibling's step 6a `read_visible()` will
+therefore see the previous leaf as a fully-realized reference — which
+is what lets downstream subscenes maintain stylistic consistency with
+already-generated ones.
+
+`ancestor_frames` threads down the call chain so every leaf receives
+its full inherited frame set (every ancestor's + its own).
 
 ---
 
-## 9. Collect leaves and ancestor frame chains
+## 9. Anchor objects + graph validator (current leaf)
 
-**Location:** `server/app/pipeline/phase1/step09_collect_leaves.py`
-(`collect_leaves` at `:19`, `collect_frames_for_leaf` at `:34`). Both
-are called from `server/app/pipeline/step03_orchestrator.py:83`.
-
-- `collect_leaves(root)` — DFS-flatten into atomic leaves.
-- `collect_frames_for_leaf(root, leaf)` — walk root → leaf and
-  concatenate every ancestor's `frames`. This is the frame list the leaf
-  inherits.
-
-For each leaf, run steps 10 → 15. After step 15 completes for one leaf,
-loop back to step 10 for the next leaf.
-
----
-
-## 10. Anchor objects + graph validator (current leaf)
-
-**Location:** `server/app/pipeline/phase2/step10_anchor_objects.py:39`
+**Location:** `server/app/pipeline/phase2/step09_anchor_objects.py:37`
 
 Another `call_with_validator` loop.
 
@@ -251,20 +252,20 @@ Another `call_with_validator` loop.
      not nodes). Cycle → `relationship_cycle` conflict.
 - On success, the validator closure stashes the resulting `GraphResult`.
 
-**Output:** `Step2Result(objects, relationships, graph)`. `graph.order`
-is the topo order used by step 11.
+**Output:** `Step9Result(objects, relationships, graph)`. `graph.order`
+is the topo order used by step 10.
 
 ---
 
-## 11. Object bbox generation (with bbox validator retry loop)
+## 10. Object bbox generation (with bbox validator retry loop)
 
-**Location:** `server/app/pipeline/phase2/step11_object_bboxes.py:32`
+**Location:** `server/app/pipeline/phase2/step10_object_bboxes.py:32`
 
 Third `call_with_validator` loop. Used in two modes by the same function:
 
 - **Initial (this call):** `already_resolved={}`,
   `to_resolve=graph.order`.
-- **Incremental:** used inside step 14; see below.
+- **Incremental:** used inside step 13; see below.
 
 - `build()` renders leaf prompt/bbox, frame summary, relationships
   summary (`summarize_relationships`), topo order, already-resolved
@@ -282,9 +283,9 @@ Each object is then cloned with its bbox attached (`objects_with_bboxes`).
 
 ---
 
-## 12. Mesh generation
+## 11. Mesh generation
 
-**Location:** `server/app/pipeline/phase2/step12_mesh_generation.py:26`
+**Location:** `server/app/pipeline/phase2/step11_mesh_generation.py:26`
 
 - Runs `ctx.mesh_generator.generate(obj.prompt, obj.id)` for every object
   under an `asyncio.Semaphore(settings.mesh_gen_concurrency)`.
@@ -302,10 +303,10 @@ scale.
 
 ---
 
-## 13. Rescale
+## 12. Rescale
 
-**Location:** `server/app/pipeline/phase2/step13_rescale.py:21`, called
-from `step14_completion_loop.py:126` (initial) and `:170` (incremental).
+**Location:** `server/app/pipeline/phase2/step12_rescale.py:21`, called
+from `step13_completion_loop.py:137` (initial) and `:183` (incremental).
 
 Per mesh:
 - Compute the mesh's current axis-aligned bounds → current max extent.
@@ -322,9 +323,9 @@ After this, `meshes` holds correctly-placed, scaled meshes keyed by
 
 ---
 
-## 14. Completion loop (add objects one at a time until the LLM says stop)
+## 13. Completion loop (add objects one at a time until the LLM says stop)
 
-**Location:** `server/app/pipeline/phase2/step14_completion_loop.py`
+**Location:** `server/app/pipeline/phase2/step13_completion_loop.py`
 (`generate_leaf` driver at `:92`, `_propose_one` LLM call at `:70`).
 
 Each iteration:
@@ -334,50 +335,48 @@ Each iteration:
    placed object's id/prompt/bbox in the prompt.
 2. **Output:** `Output(stop: bool, object: Optional[NewObject],
    new_relationships: list[Relationship])`. If `stop=True` or
-   `object is None` → break out of the loop (go to step 15).
+   `object is None` → break out of the loop (go to step 14).
 3. Build a candidate graph (objects ∪ new object, rels ∪ new rels) and
-   re-run `validate_and_sort` from step 10's validator. If the proposal is
-   structurally broken (cycle, contradiction, unknown target, ...),
+   re-run `validate_and_sort` from step 9's validator. If the proposal
+   is structurally broken (cycle, contradiction, unknown target, ...),
    **break** — do not retry. Keep everything placed so far.
-4. Re-enter **step 11 in incremental mode** with
+4. Re-enter **step 10 in incremental mode** with
    `already_resolved=<current bboxes>` and `to_resolve=[new_obj.id]`.
    This is a full validator-driven retry loop on just the new bbox — it
    must fit the leaf and not overlap existing bboxes. Retry exhaustion
    fails the whole run.
-5. Re-enter **step 12 + step 13** for just the new object; merge the
+5. Re-enter **step 11 + step 12** for just the new object; merge the
    rescaled mesh into `meshes`.
-6. Append to `placed` and `all_rels`; loop back to 14.1.
+6. Append to `placed` and `all_rels`; loop back to 13.1.
 
 ---
 
-## 15. Write realized entry to the state repository
+## 14. Write realized entry to the state repository
 
-**Location:** `server/app/pipeline/phase2/step15_write_realized.py:18`
-(called from `step14_completion_loop.py` at the end of `generate_leaf`).
+**Location:** `server/app/pipeline/phase2/step14_write_realized.py:18`
+(called from `step13_completion_loop.py` at the end of `generate_leaf`).
 
 Before returning the leaf result:
 - `ctx.state_repo.write_realized(RealizedEntry(scope_id, prompt, bbox,
   objects, relationships))`.
 - Emit `StateRepoWrite(entry_type="realized", scope_id=leaf.scope_id)`.
 
-This is what future step 6a (`read_visible`) calls would see as "Leaves
-already realized". In today's strictly-sequential orchestrator this
-cannot happen within a single run (step 4's recursion fully completes
-before step 10 starts), but the write/read contract is already in place
-for later interleaving.
+This is what future step 6a (`read_visible`) calls will see as "Leaves
+already realized". Under the interleaved model (step 8), this write
+actually happens *during* phase-1 recursion — so the very next sibling's
+step 6 call reads it.
 
 **Output (of the leaf loop iteration):**
 `GeneratedLeaf(scope_id, leaf, objects, relationships, frames, meshes)`.
 
-After step 15, the orchestrator loops back to step 10 for the next leaf
-(or proceeds to step 16 once all leaves are done).
+Returns to step 8 recursion, which unwinds to the parent.
 
 ---
 
-## 16. Assemble the scene
+## 15. Assemble the scene
 
-**Location:** `server/app/pipeline/step16_assemble_scene.py:24`. Called
-from `step03_orchestrator.py:91`.
+**Location:** `server/app/pipeline/step15_assemble_scene.py:24`. Called
+from `step03_orchestrator.py:85`.
 
 **Inputs:**
 - `object_meshes: list[(object_id, Trimesh)]` — flattened across every
@@ -403,24 +402,24 @@ by id.
 
 ---
 
-## 17. Publish the GLB
+## 16. Publish the GLB
 
-**Location:** `server/app/pipeline/step17_publish_glb.py` (`publish` at
+**Location:** `server/app/pipeline/step16_publish_glb.py` (`publish` at
 `:35`, `write_glb` at `:25`, `glb_path_for` at `:20`).
 
 - Path: `runs/{run_id}/scene.glb`.
 - `scene.export(file_type="glb")` → bytes → write to disk. Y-up,
   right-handed, meters — matches glTF 2.0.
 
-**Output:** `(path, "/glb/{run_id}")`. The URL propagates back up through
-`orchestrator.run` → `execute_run`, is written into `run.json` as
-`glb_url`, and is emitted on `RunCompleted`.
+**Output:** `(path, "/glb/{run_id}")`. The URL propagates back up
+through `orchestrator.run` → `execute_run`, is written into `run.json`
+as `glb_url`, and is emitted on `RunCompleted`.
 
 ---
 
-## 18. Serve (independent of the pipeline task)
+## 17. Serve (independent of the pipeline task)
 
-**Location:** `server/app/api/step18_serve.py` (handlers at `:32`, `:40`,
+**Location:** `server/app/api/step17_serve.py` (handlers at `:32`, `:40`,
 `:56`, `:84`).
 
 - `GET /glb/{run_id}` resolves `glb_path_for(run_id)` and serves the
@@ -444,32 +443,29 @@ prompt: str
          │
          ├─ [4]  overall bbox (root only)            → root SubsceneNode
          │
-         ├─ per node (starting at root):
+         ├─ per node (DFS starting at root):
          │     [5]  frame decider                    → node.frames
          │     [6]  scene breakdown + bbox validator → is_atomic | [subscene specs]
-         │       ├─ if atomic: stop recursion
-         │       └─ else:
+         │       ├─ if atomic (leaf):
+         │       │     phase 2 fires IN PLACE, before unwinding:
+         │       │       [9]  anchor objects + graph validator
+         │       │       [10] object bboxes (initial)
+         │       │       [11] mesh generation
+         │       │       [12] rescale
+         │       │       [13] completion loop:
+         │       │              propose 1 object + rels
+         │       │              re-validate graph (break on invalid)
+         │       │              → [10] incremental + [11] + [12]
+         │       │              repeat until stop
+         │       │       [14] write realized entry  ← visible to siblings' [6a]
+         │       │     append GeneratedLeaf; return
+         │       └─ else (non-leaf):
          │            [7]  write plan entries
          │            [8]  recurse into each child → [5]
          │
-         ├─ [9]  collect leaves + ancestor frame chains
-         │
-         ├─ per leaf:
-         │     [10] anchor objects + graph validator → objects, rels, topo order
-         │     [11] object bboxes (initial) + validator → {id: bbox}
-         │     [12] mesh generation                  → {id: raw Trimesh}
-         │     [13] rescale                          → {id: placed Trimesh}
-         │     [14] completion loop:
-         │            propose 1 object + rels
-         │            re-validate graph (break on invalid)
-         │            → [11] incremental + [12] + [13]
-         │            repeat until stop
-         │     [15] write realized entry
-         │     next leaf → [10]
-         │
-         ├─ [16] assemble scene (meshes + frames)    → trimesh.Scene
-         └─ [17] publish GLB                         → runs/{run_id}/scene.glb + "/glb/{run_id}"
+         ├─ [15] assemble scene (meshes + frames)    → trimesh.Scene
+         └─ [16] publish GLB                         → runs/{run_id}/scene.glb + "/glb/{run_id}"
                  emit RunCompleted(glb_url)
 
-  [18] later: GET /glb/{run_id} serves the file
+  [17] later: GET /glb/{run_id} serves the file
 ```

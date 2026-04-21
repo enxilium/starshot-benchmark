@@ -1,4 +1,4 @@
-"""PIPELINE.md step 10 — list anchor objects + relationships for a leaf subscene."""
+"""PIPELINE.md step 9 — list anchor objects + relationships for a leaf subscene."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.core.types import BoundingBox, Relationship
 
-STEP_ID = "step10"
+STEP_ID = "step09"
 
 SYSTEM_PROMPT = """\
 You are generating the contents of a leaf subscene in a 3D scene pipeline. \

@@ -1,5 +1,5 @@
 """
-PIPELINE.md step 18 — post-run HTTP surface.
+PIPELINE.md step 17 — post-run HTTP surface.
 
 Four endpoints, all independent of the pipeline task:
 
@@ -24,7 +24,7 @@ from app.api.registry import get_registry
 from app.api.run_summary import RunSummary, read_summary
 from app.core.config import get_settings
 from app.core.events import EventLog, read_events_jsonl
-from app.pipeline.step17_publish_glb import glb_path_for
+from app.pipeline.step16_publish_glb import glb_path_for
 
 router = APIRouter()
 

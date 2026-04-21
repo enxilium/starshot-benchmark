@@ -1,10 +1,10 @@
 """
-PIPELINE.md step 10 — anchor objects + relationships.
+PIPELINE.md step 9 — anchor objects + relationships.
 
 Wraps `call_with_validator` with the relationship-graph validator. The
 `GraphResult` (topologically sorted order + normalized relationships)
 is returned alongside the validated (objects, relationships) pair so
-the downstream bbox step (step 11) doesn't need to re-run the DAG
+the downstream bbox step (step 10) doesn't need to re-run the DAG
 analysis.
 """
 
@@ -17,7 +17,7 @@ from app.core.errors import ValidationConflict
 from app.core.types import AnchorObject, Frame, Relationship, SubsceneNode
 from app.geometry.relationship_graph import GraphResult, validate_and_sort
 from app.llm.client import PriorAttempt, PromptPayload, call_with_validator
-from app.llm.prompts.phase2_step10_anchor_objects import (
+from app.llm.prompts.phase2_step09_anchor_objects import (
     STEP_ID,
     SYSTEM_PROMPT,
     Output,
@@ -28,13 +28,13 @@ from .frame_summary import summarize_frames
 
 
 @dataclass(frozen=True)
-class Step10Result:
+class Step9Result:
     objects: list[AnchorObject]
     relationships: list[Relationship]
     graph: GraphResult
 
 
-async def run(*, leaf: SubsceneNode, frames: list[Frame]) -> Step10Result:
+async def run(*, leaf: SubsceneNode, frames: list[Frame]) -> Step9Result:
     ctx = current()
     frame_ids = {f.id for f in frames}
     frame_summary = summarize_frames(frames)
@@ -69,7 +69,7 @@ async def run(*, leaf: SubsceneNode, frames: list[Frame]) -> Step10Result:
         validate=validate,
     )
     objects = [AnchorObject(id=o.id, prompt=o.prompt) for o in out.objects]
-    return Step10Result(
+    return Step9Result(
         objects=objects,
         relationships=out.relationships,
         graph=graph_holder["r"],

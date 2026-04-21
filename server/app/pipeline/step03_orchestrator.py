@@ -1,20 +1,22 @@
 """
 PIPELINE.md step 3 — top-level pipeline orchestrator.
 
+Phase 1 and phase 2 are **interleaved**: `step08_recurse.divide` dives
+DFS and fires the full phase 2 on every leaf before unwinding. The
+orchestrator receives back both the fully-populated `SubsceneNode` tree
+and the list of `GeneratedLeaf`s in DFS-realization order.
+
 Flow per run:
   * Emit `RunStarted`.
-  * Step 8 (`step08_recurse.divide`) — build the `SubsceneNode` tree.
-  * Step 9 (`step09_collect_leaves`) — flatten to leaves + frame chains.
-  * Per leaf: step 14 (`step14_completion_loop.generate_leaf`) — runs
-    phase-2 steps 10 → 11 → 12 → 13 → 14 loop → 15 internally.
-  * Step 16 (`step16_assemble_scene.build_scene`) — merge every mesh.
-  * Step 17 (`step17_publish_glb.publish`) — write the `.glb`.
+  * Steps 4-14 (`step08_recurse.divide` with `realize_leaves=True`):
+      - step 4 at the root (overall bbox)
+      - per node: step 5 (frames), step 6 (breakdown)
+      - leaves: phase 2 fires inline (steps 9 → 10 → 11 → 12 → 13 loop
+        → 14) before the recursion unwinds
+      - non-leaves: step 7 (write plans), then recurse (step 8)
+  * Step 15 (`step15_assemble_scene.build_scene`) — merge every mesh.
+  * Step 16 (`step16_publish_glb.publish`) — write the `.glb`.
   * Emit `RunCompleted` with the URL + retry summary.
-
-Sequential per-leaf iteration keeps the State Repository's realized
-entries observable in a deterministic order by any future interleaved
-phase-1 / phase-2 variation. Today's implementation runs all of phase 1
-first, then phase 2 — the design already accommodates relaxing that.
 """
 
 from __future__ import annotations
@@ -33,9 +35,8 @@ from app.core.events import (
     parse_event_line,
 )
 from app.core.types import Frame, SubsceneNode
-from app.pipeline import step16_assemble_scene, step17_publish_glb
-from app.pipeline.phase1 import step08_recurse, step09_collect_leaves
-from app.pipeline.phase2 import step14_completion_loop
+from app.pipeline import step15_assemble_scene, step16_publish_glb
+from app.pipeline.phase1 import step08_recurse
 
 
 def _collect_all_frames(root: SubsceneNode) -> list[Frame]:
@@ -72,32 +73,22 @@ async def run(user_prompt: str, model_id: str) -> str:
     await ctx.events.emit(RunStarted(prompt=user_prompt, model_id=model_id))
 
     try:
-        # Step 8 — recursive divide
-        root = await step08_recurse.divide(user_prompt)
+        # Steps 4-14 (interleaved phase 1 + phase 2).
+        root, generated_leaves = await step08_recurse.divide(user_prompt)
 
-        # Step 9 — flatten to leaves + frame chains, then step 14 per leaf
-        leaves = step09_collect_leaves.collect_leaves(root)
-        generated_leaves = []
-        for leaf in leaves:
-            ancestor_frames = step09_collect_leaves.collect_frames_for_leaf(root, leaf)
-            generated = await step14_completion_loop.generate_leaf(
-                leaf=leaf, frames=ancestor_frames
-            )
-            generated_leaves.append(generated)
-
-        # Step 16 — assemble final scene
+        # Step 15 — assemble final scene.
         object_meshes: list[tuple[str, object]] = []
         for gl in generated_leaves:
             for oid, mesh in gl.meshes.items():
                 object_meshes.append((oid, mesh))
         all_frames = _collect_all_frames(root)
-        scene = step16_assemble_scene.build_scene(
+        scene = step15_assemble_scene.build_scene(
             object_meshes=object_meshes,  # type: ignore[arg-type]
             frames=all_frames,
         )
 
-        # Step 17 — publish
-        _, url = step17_publish_glb.publish(ctx.run_id, scene)
+        # Step 16 — publish.
+        _, url = step16_publish_glb.publish(ctx.run_id, scene)
 
         duration_ms = (time.perf_counter() - t0) * 1000.0
         retry_summary = _retry_summary_from_events(ctx.events.path)
