@@ -1,0 +1,9 @@
+{
+  "run_id": "cbf597b628444662adfd8185e15cd670",
+  "status": "failed",
+  "started_at": "2026-04-21T14:29:45.930881Z",
+  "finished_at": "2026-04-21T14:29:46.276438Z",
+  "glb_url": null,
+  "error": "AuthenticationError(\"Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}, 'request_id': 'req_011CaH5MkbTKJAQ4h5NGtgUg'}\")",
+  "retry_summary": {}
+}
