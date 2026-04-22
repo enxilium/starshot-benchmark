@@ -1,0 +1,4 @@
+.env
+server/runs/
+client/node_modules/
+.ruff_cache/

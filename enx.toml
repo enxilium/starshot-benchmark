@@ -18,6 +18,7 @@ name = "starshot-benchmark"
 steps = [
     # "npm install",
     # "docker compose up -d",
+    "cd server && uv sync",
 ]
 
 # [down] uses a list of shell commands run by `enx down`.
@@ -46,11 +47,11 @@ commands = [
 # [tasks."db:migrate"]
 # command = "npx prisma migrate dev"
 [tasks.test]
-command = "echo \"define your test command\""
+command = "uv run scripts/run_request.py"
 description = "Run test suite"
 
 # [open] maps target name -> URL or shell command for `enx open <target>`.
 [open]
-# repo = "https://github.com/myorg/my-repo"
+repo = "https://github.com/enxilium/starshot-benchmark"
 # code = "code ."
 # docs = "https://docs.example.com"

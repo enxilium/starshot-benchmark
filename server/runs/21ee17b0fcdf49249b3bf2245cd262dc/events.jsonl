@@ -1,4 +1,0 @@
-{"run_id":"21ee17b0fcdf49249b3bf2245cd262dc","timestamp":"2026-04-21T14:36:02.131317Z","seq":1,"type":"run_started","prompt":"x","model_id":"claude-opus-4-7"}
-{"run_id":"21ee17b0fcdf49249b3bf2245cd262dc","timestamp":"2026-04-21T14:36:02.131719Z","seq":2,"type":"phase_started","phase":"phase1","scope_id":"root"}
-{"run_id":"21ee17b0fcdf49249b3bf2245cd262dc","timestamp":"2026-04-21T14:36:02.131913Z","seq":3,"type":"step_started","step_id":"phase1.step2","inputs_summary":{}}
-{"run_id":"21ee17b0fcdf49249b3bf2245cd262dc","timestamp":"2026-04-21T14:36:02.588394Z","seq":4,"type":"run_failed","error":"AuthenticationError(\"Error code: 401 - {'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}, 'request_id': 'req_011CaH5qV8Jsbqh6JajYmx32'}\")","step_id":null}

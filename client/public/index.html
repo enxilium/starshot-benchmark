@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="server-url" content="http://127.0.0.1:8765" />
+    <title>starshot-benchmark viewer</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #101114; color: #e6e6e6; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      #canvas-host { position: fixed; inset: 0; }
+      #canvas-host canvas { display: block; }
+      #prompt-form {
+        position: fixed; top: 12px; left: 12px; right: 12px; max-width: 560px;
+        display: flex; gap: 8px; align-items: stretch;
+        padding: 8px; border-radius: 6px;
+        background: rgba(22, 24, 29, 0.82); backdrop-filter: blur(6px);
+      }
+      #prompt-input {
+        flex: 1; min-width: 0; resize: vertical; min-height: 36px; max-height: 160px;
+        padding: 8px 10px; border-radius: 4px; border: 1px solid #2a2d35;
+        background: #16181d; color: #e6e6e6;
+        font: inherit; font-size: 12px; line-height: 1.4;
+      }
+      #prompt-input:focus { outline: none; border-color: #4a8fd8; }
+      #prompt-submit {
+        padding: 0 14px; border-radius: 4px; border: 1px solid #2a2d35;
+        background: #2a4a78; color: #e6e6e6; font: inherit; font-size: 12px;
+        cursor: pointer; white-space: nowrap;
+      }
+      #prompt-submit:hover:not(:disabled) { background: #345a92; }
+      #prompt-submit:disabled { opacity: 0.5; cursor: default; }
+      #status {
+        position: fixed; top: 96px; left: 12px; right: 12px; max-width: 560px;
+        padding: 10px 12px; border-radius: 6px;
+        background: rgba(22, 24, 29, 0.78); backdrop-filter: blur(6px);
+        font-size: 12px; line-height: 1.4; pointer-events: none;
+      }
+      #status .line { margin: 0; white-space: pre-wrap; word-break: break-word; }
+      #status .line.err { color: #ff8080; }
+      #status .line.hdr { color: #9ad4ff; }
+      #log {
+        position: fixed; bottom: 12px; left: 12px; right: 12px; max-height: 28vh;
+        overflow: auto; padding: 8px 12px; border-radius: 6px;
+        background: rgba(22, 24, 29, 0.78); backdrop-filter: blur(6px);
+        font-size: 11px; line-height: 1.45; pointer-events: auto;
+      }
+      #log .line { margin: 0; white-space: pre-wrap; word-break: break-word; }
+      #log .step { color: #8bd17c; font-weight: 600; }
+      #log .kv { margin-left: 2px; }
+      #log .kv .k { color: #8a8f99; }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/vendor/three/build/three.module.js",
+          "three/addons/": "/vendor/three/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="canvas-host"></div>
+    <form id="prompt-form" autocomplete="off">
+      <textarea
+        id="prompt-input"
+        rows="2"
+        placeholder="Describe a scene…"
+      >A modern, fancy looking house.</textarea>
+      <button id="prompt-submit" type="submit">Run</button>
+    </form>
+    <div id="status"><p class="line hdr">ready</p></div>
+    <div id="log"></div>
+    <script type="module" src="/viewer.js"></script>
+  </body>
+</html>

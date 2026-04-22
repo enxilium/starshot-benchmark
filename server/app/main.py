@@ -1,20 +1,9 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from dotenv import load_dotenv
 
-from app.api.routes import router
+load_dotenv()
 
-
-def create_app() -> FastAPI:
-    app = FastAPI(
-        title="starshot-benchmark",
-        version="0.1.0",
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
-    )
-    app.include_router(router)
-    return app
-
+from app.api.routes import create_app  # noqa: E402
 
 app = create_app()

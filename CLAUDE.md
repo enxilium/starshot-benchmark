@@ -4,9 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project purpose
 
-`starshot-benchmark` is an orchestrator for a **text-to-3D scene pipeline**. A user prompt like "A beautiful modern mansion" or "A swamp with islands" is recursively decomposed by LLMs into subscenes and anchor objects, each generated as a 3D mesh via **Hunyuan 3.1**, then composed into a single `.glb` file.
+`starshot-benchmark` is an orchestrator for a **text-to-3D scene pipeline**. A user prompt like "A beautiful modern mansion" or "A swamp with islands" is recursively decomposed by LLMs into subzones and objects, each generated as a 3D mesh via **Hunyuan 3.1**, then composed into a single `.glb` file.
 
 The broader goal is to **benchmark LLM spatial reasoning** — the dashboard lets you swap the LLM used at every reasoning step in the pipeline and compare outputs.
+
+## Engineering principles
+
+- **Do the minimum that achieves the result.** If three lines work, don't write a helper. If a bug fix is one line, don't refactor the surrounding code.
+- **No speculative features.** Don't add framework niceties, extra endpoints, abstractions, validators, or config knobs that aren't required by the current task. YAGNI hard.
+- **No scope creep.** Stick to what the pipeline spec below describes. If something seems missing, ask — don't invent.
+- **No tests.** This is a prototyping benchmark tool; tests have been explicitly removed.
+- **FastAPI default docs/openapi routes stay disabled.**
 
 ## Repository layout (planned)
 
@@ -15,71 +23,82 @@ Two top-level parts:
 - **`client/`** — Node process running a Three.js sandbox + dashboard. Lets the user pick the LLM used across the pipeline, submits a prompt to the server, then loads and renders the returned `.glb` URL.
 - **`server/`** — Orchestrator that runs the full pipeline described below and returns a URL to the final `.glb`.
 
-The repo is currently a clean slate aside from `enx.toml` (project meta for the `enx` task runner). When implementing, choose stacks appropriate for: (a) heavy LLM orchestration and async work on the server, (b) a minimal dashboard + Three.js viewer on the client.
+## Core domain type: `Node`
 
-## Pipeline architecture
+Everything in the scene tree is a `Node`. Zones (subscenes) and objects are both Nodes; they differ only in what's populated:
 
-The pipeline has **two distinct phases**. Phase 1 recursively *divides* the scene down to leaves; phase 2 *generates* geometry for each leaf and composes up.
+- `id: str`
+- `prompt: str`
+- `bbox: BoundingBox` — axis-aligned, world-space.
+- `relationships: list[Relationship]` — how this node is anchored to its parent / siblings / a frame.
+- `mesh_url: str | None` — set for concrete nodes (objects, realized frames). `None` for abstract zones.
+- `children: list[Node]` — zones populate this; atomic leaves don't.
+
+### Canonical front view
+
+One global convention, used to interpret every bbox corner and relationship:
+
+- `+X` = right
+- `+Y` = up
+- `+Z` = toward the viewer (front)
+- `-Z` = away from the viewer (back)
+
+Right-handed, Y-up, meters. There is no per-scene "front view" — the axes above are it.
+
+### `Relationship`
+
+Relates a node to a target (parent id, sibling id, or a frame id):
+
+- `target: str`
+- `kind: RelationshipKind` — `ON`, `BESIDE`, `BELOW`, `ABOVE`, `ATTACHED`. Centrally defined; the vocabulary may grow.
+- `reference_point: Corner` — which of the target bbox's 8 corners this relationship anchors against, under the canonical front view.
+
+`Corner` is one of: `TOP_LEFT_FRONT`, `TOP_LEFT_BACK`, `TOP_RIGHT_FRONT`, `TOP_RIGHT_BACK`, `BOTTOM_LEFT_FRONT`, `BOTTOM_LEFT_BACK`, `BOTTOM_RIGHT_FRONT`, `BOTTOM_RIGHT_BACK`.
+
+## Pipeline
+
+The pipeline has two phases. Phase 1 (divider) recursively decomposes the prompt into a tree of Nodes with resolved bboxes. Phase 2 (generation) realizes meshes for atomic leaves. Phase 2 is currently a stub.
 
 ### Phase 1 — Divider (recursive top-down)
 
-Operates on `(prompt, bounding_box, parent_context)` and recurses.
+Entry: `(prompt, model, run_id, runs_dir)`. Exit: a root `Node` with the full subtree.
 
-1. **Input** — user prompt.
-2. **Bounding Box Generation (LLM)** — overall bbox sized to scene shape (tall+narrow for a skyscraper, long+flat for a river).
-3. **Scene Breakdown (LLM)** — splits the current scene into subscenes. For each subscene, emits:
-   - a detailed prompt,
-   - a bounding box contained within the parent's bbox,
-   - a **high-level plan** of what the subscene will contain downstream. Plans are persisted to a **State Repository** and re-fetched on future recursions so siblings stay consistent.
+1. **Receive user prompt.**
+2. **Overall bounding box (LLM).** Size the root bbox to the scene shape (tall+narrow skyscraper, long+flat river, etc.). Interpreted under the canonical front view above.
+3. **Children decomposition (LLM).** Given the current node's prompt and bbox, the LLM emits either `is_atomic=true` (stop recursing on this node) or a list of child specs. Each child spec has: `id`, `prompt`, and a list of `Relationship`s anchoring it to the parent or already-listed siblings. The LLM does **not** pick concrete coordinates here.
+4. **Topologically order children** by their sibling relationships so each is placed after every sibling it depends on. Cycles are an error.
+5. **Per child, in topo order:**
+   1. **Bounding box resolution (LLM).** Given the parent bbox, sibling bboxes already placed, the child's prompt, and its relationships, the LLM produces the child's concrete AABB. Must lie inside the parent bbox, not overlap siblings, and respect each relationship's `kind` + `reference_point`.
+   2. **Frame decider (LLM).** Decide whether this child needs architectural geometry (walls, floor, ceiling, roof, curved enclosure). If yes, produce frame specs. Frames are realized **deterministically**:
+      - `plane` — flat rectangular surface.
+      - `curve` — vertically-extruded Catmull-Rom spline; closed loops get floor + ceiling caps.
+      - `generated` — escape hatch: Hunyuan produces the shell mesh, we rescale it into the child's bbox.
 
-   The State Repository read at this step also includes **any subscenes that have already completed phase 2** elsewhere in the recursion (see below) — the LLM should use their realized object lists to keep later subscenes stylistically consistent with what's already been generated.
-4. **Bounding-box validator (deterministic)** — checks no sibling bboxes overlap. On conflict, record the conflict and loop back to step 3 with the conflict details. **Every retry must be logged** (retry counts are a benchmark signal).
-5. **Frame Decider (LLM)** — does this subscene need a frame (walls/floor/ceiling)? If yes, generate frame geometry deterministically (no Hunyuan). Two frame types:
-   - `plane` — standard flat surfaces (walls, ceilings, floors).
-   - `curve` — parametric equation + endpoints, used for non-planar surroundings.
-6. **Recurse** — treat each subscene as the new scene and repeat from step 3. Terminate when step 3 decides a subscene is atomic (e.g., the toilet area of a bathroom).
+      Each realized frame becomes a concrete child `Node` of the placed child, with `mesh_url` pointing at its `.glb`.
+6. **Recurse** into each placed child and go back to step 3. Atomic leaves stop recursing and (eventually) flow into phase 2.
 
-### Phase 2 — Generation (bottom-up per leaf subscene)
+The root is never fed through the frame decider — frames belong to decomposed zones, not to the world-scale canvas.
 
-Runs on every leaf subscene emitted by phase 1.
+### Phase 2 — Generation (stub)
 
-1. **Input** — prompt, bbox, parent ref, parent frame definitions (if any).
-2. **Anchor objects (LLM)** — list of defining objects (e.g., a meeting room → table, chairs, TV) plus **relationships** from a fixed vocabulary: `ON`, `BESIDE`, `BELOW`, `ABOVE`, `ATTACHED`. Vocabulary may grow — keep it centrally defined. Example: `CHAIR BESIDE TABLE`.
-3. **Relationship validator (deterministic)** — must form a valid DAG. Enforces:
-   - implied inverses (`A ABOVE B` ⟹ `B BELOW A`),
-   - no contradictions,
-   - every object participates in at least one relationship,
-   - relationship targets are valid (another object or a parent frame).
-4. **Per-object bbox generation** — starting from objects attached to parent frames (whose coords are already known), resolve via **topological sort** down the dependency chain.
-5. **Object-bbox validator** — same rules as phase-1 step 4: no overlaps, every object has a bbox, all bboxes fit within the parent bbox. Retries loop back and are logged.
-6. **Mesh generation (Hunyuan 3.1)** — one mesh per anchor object using its prompt.
-7. **Rescale** — fit each mesh to its bbox via the **maximal dimension**. Overshoot in other dimensions post-scaling is acceptable.
-8. **State-driven completion loop (LLM)** — assemble a `state` containing (objects so far, their prompts, their coords) and ask the LLM "does this scene need any more objects?" The LLM returns **exactly one** additional object. Run that single object through steps 3–7, update `state`, and ask again. Loop until the LLM says no more are needed.
-9. **Assembly** — merge all meshes + frames into the final `.glb` and return a URL to the client.
+Not implemented. When implemented, it will take an atomic leaf `Node` and populate it / its children with Hunyuan meshes. Anchor-object resolution, relationship DAG validation, per-object bbox resolution, mesh generation, rescaling, state-driven completion loop, and assembly all belong here. Until phase 2 exists, atomic leaves just stay abstract in the tree.
 
-On completion, the leaf subscene's **realized contents** (final object list with prompts and coords) are written back to the **State Repository**. Because phase 1 and phase 2 interleave — a leaf like the bathroom's toilet area can finish generating entirely before a sibling like the bedroom has even picked a frame — later phase-1 step 3 calls must be able to read already-completed subscenes and use them as stylistic reference.
+## Cross-cutting concerns
 
-## Cross-cutting concerns to preserve in implementation
-
-- **Pluggable LLM selection.** Every LLM call site must read the model from a request-scoped config sourced from the dashboard. Do not hard-code model IDs at call sites.
-- **State Repository.** Holds two kinds of entries, both read by phase-1 step 3:
-  1. **High-level plans** written when a subscene is first broken down (used so siblings stay consistent with not-yet-generated areas).
-  2. **Realized subscene contents** written when phase 2 finishes a leaf (object list, prompts, coords) — used for stylistic consistency with *already-generated* areas, since divider and generator phases interleave across the tree.
-
-  Treat it as a first-class module, not ad-hoc state inside the recursion. Writes come from both phases; reads come primarily from phase-1 step 3.
-- **Retry logging.** Both bbox validators (phase 1 step 4, phase 2 step 5) and the relationship validator can force retries. Record every retry with the conflict detail — this is core benchmark output.
-- **Deterministic vs. LLM steps.** Validators, frame generation, rescaling, topological sort, and assembly are deterministic. Keep them free of LLM calls so benchmark results isolate LLM quality.
-- **Recursion termination** is an LLM decision (phase 1 step 3). There is no hard depth cap in the spec — if one is added, make it configurable.
-- **Frames are not Hunyuan.** Plane and curve frames are generated programmatically from their definitions.
+- **Pluggable LLM selection.** Every LLM call site reads the model from a request-scoped value (currently passed as `model: str` through the pipeline). No hard-coded model IDs at call sites.
+- **Deterministic vs. LLM steps.** Frame realization (plane/curve meshing), mesh rescaling, and `.glb` assembly are deterministic. LLM calls are: overall bbox, children decomposition, bbox resolution, frame decider. Keep determinism free of LLM calls so benchmark results isolate LLM quality.
+- **Retry logging (when validators exist).** The current flow is optimistic — the LLM is trusted on bbox placement. If/when deterministic validators are added back, every retry must be logged; retry counts are a core benchmark signal. Don't preemptively add the validators.
+- **Recursion termination** is an LLM decision (step 3's `is_atomic`). No hard depth cap.
+- **Frames are not Hunyuan** (except the `generated` escape hatch). Plane and curve frames are baked from their specs.
 
 ## Client ↔ server contract
 
 - Client `POST`s `(prompt, model_selection)` to the server.
-- Server runs the full two-phase pipeline and responds with a URL to the final `.glb`.
+- Server runs the divider (and eventually phase 2) and responds with a URL to the final `.glb`.
 - Client fetches the `.glb` from that URL and renders it in the Three.js sandbox.
 
-Keep this surface small; the dashboard's primary job is model selection and prompt submission, not pipeline introspection (though surfacing retry counts and phase timings later is valuable for the benchmark use case).
+Keep this surface small; the dashboard's primary job is model selection and prompt submission.
 
 ## Commands
 
-No build/test/lint commands are wired up yet — the repo is a fresh scaffold. `enx.toml` exposes `enx up`, `enx down`, `enx start`, and `enx test` hooks; populate them as the client and server stacks are chosen.
+No build/test/lint commands are wired up yet. `enx.toml` exposes `enx up`, `enx down`, `enx start`, `enx test` hooks; populate them as stacks stabilize.
