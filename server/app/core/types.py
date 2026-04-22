@@ -10,10 +10,8 @@ convention.
 from __future__ import annotations
 
 from enum import StrEnum
-from itertools import pairwise
-from typing import Annotated, Literal
+from typing import Annotated
 
-import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 Vec3Tuple = tuple[float, float, float]
@@ -115,9 +113,12 @@ class Relationship(BaseModel):
 class Node(BaseModel):
     """Tree node for the scene.
 
-    Zones and objects are both Nodes. Zones are abstract (mesh_url is None,
-    children populated). Concrete nodes (objects, realized frames) set
-    mesh_url and typically have no children.
+    Zones and objects are both Nodes. Zones are abstract (mesh_url is None)
+    and carry a high-level `plan` that seeds their further decomposition.
+    Concrete nodes (objects) set mesh_url and have no plan. Each node stores
+    only its parent id; the full tree is recoverable via the run-scoped flat
+    registry, but the pipeline emits state to clients incrementally via SSE
+    events rather than by traversing the Node graph.
     """
 
     id: str
@@ -125,112 +126,5 @@ class Node(BaseModel):
     bbox: BoundingBox
     relationships: list[Relationship] = Field(default_factory=list)
     mesh_url: str | None = None
-    children: list[Node] = Field(default_factory=list)
-
-
-# --- Frame geometry (deterministic architectural surfaces) -----------------
-
-
-class _FrameMixin:
-    def surface_point(self, u: float, v: float) -> Vec3Tuple:
-        raise NotImplementedError
-
-    def surface_normal(self, u: float, v: float) -> Vec3Tuple:
-        raise NotImplementedError
-
-
-class PlaneFrame(BaseModel, _FrameMixin):
-    model_config = ConfigDict(frozen=True)
-
-    id: str
-    kind: Literal["plane"] = "plane"
-    origin: Vec3Tuple
-    u_axis: Vec3Tuple
-    v_axis: Vec3Tuple
-
-    def surface_point(self, u: float, v: float) -> Vec3Tuple:
-        return (
-            self.origin[0] + u * self.u_axis[0] + v * self.v_axis[0],
-            self.origin[1] + u * self.u_axis[1] + v * self.v_axis[1],
-            self.origin[2] + u * self.u_axis[2] + v * self.v_axis[2],
-        )
-
-    def surface_normal(self, u: float, v: float) -> Vec3Tuple:
-        _ = (u, v)
-        n = np.cross(np.asarray(self.u_axis), np.asarray(self.v_axis))
-        length = float(np.linalg.norm(n))
-        if length == 0.0:
-            raise ValueError(f"Degenerate plane {self.id!r}")
-        n = n / length
-        return (float(n[0]), float(n[1]), float(n[2]))
-
-
-class CurveFrame(BaseModel, _FrameMixin):
-    model_config = ConfigDict(frozen=True)
-
-    id: str
-    kind: Literal["curve"] = "curve"
-    control_points: list[Vec3Tuple] = Field(min_length=2)
-    height: float = Field(gt=0.0)
-
-    def interp_arc(self, u: float) -> Vec3Tuple:
-        u = max(0.0, min(1.0, u))
-        pts = self.control_points
-        segs = list(pairwise(pts))
-        lengths = [float(np.linalg.norm(np.asarray(b) - np.asarray(a))) for a, b in segs]
-        total = sum(lengths)
-        if total == 0.0:
-            return pts[0]
-        target = u * total
-        accum = 0.0
-        for (a, b), length in zip(segs, lengths, strict=True):
-            if accum + length >= target:
-                t = 0.0 if length == 0.0 else (target - accum) / length
-                return (
-                    a[0] + t * (b[0] - a[0]),
-                    a[1] + t * (b[1] - a[1]),
-                    a[2] + t * (b[2] - a[2]),
-                )
-            accum += length
-        return pts[-1]
-
-    def surface_point(self, u: float, v: float) -> Vec3Tuple:
-        base = self.interp_arc(u)
-        return (base[0], base[1] + v * self.height, base[2])
-
-    def surface_normal(self, u: float, v: float) -> Vec3Tuple:
-        _ = v
-        eps = 1e-4
-        p0 = self.interp_arc(max(0.0, u - eps))
-        p1 = self.interp_arc(min(1.0, u + eps))
-        tangent = np.asarray([p1[i] - p0[i] for i in range(3)])
-        t_len = float(np.linalg.norm(tangent))
-        if t_len == 0.0:
-            raise ValueError(f"Degenerate curve {self.id!r} at u={u}")
-        tangent = tangent / t_len
-        n = np.cross(tangent, np.asarray([0.0, 1.0, 0.0]))
-        n_len = float(np.linalg.norm(n))
-        if n_len == 0.0:
-            return (1.0, 0.0, 0.0)
-        n = n / n_len
-        return (float(n[0]), float(n[1]), float(n[2]))
-
-
-class GeneratedFrame(BaseModel, _FrameMixin):
-    model_config = ConfigDict(frozen=True)
-
-    id: str
-    kind: Literal["generated"] = "generated"
-    prompt: str
-    bounds: BoundingBox | None = None
-
-    def surface_point(self, u: float, v: float) -> Vec3Tuple:
-        raise NotImplementedError
-
-    def surface_normal(self, u: float, v: float) -> Vec3Tuple:
-        raise NotImplementedError
-
-
-Frame = Annotated[
-    PlaneFrame | CurveFrame | GeneratedFrame, Field(discriminator="kind")
-]
+    parent_id: str | None = None
+    plan: str | None = None

@@ -1,6 +1,10 @@
 """Single-shot Hunyuan text-to-mesh call via fal_client.
 
 Named `threed.py` because Python module names cannot start with a digit.
+
+The returned GLB has textures embedded in its binary chunk, but trimesh
+cannot decode them unless Pillow is installed at import time. Pillow is a
+project dependency (see pyproject.toml) for that reason.
 """
 
 from __future__ import annotations

@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.core.types import BoundingBox, Relationship, Vec3Tuple
+from app.core.types import BoundingBox, Relationship
 
 
 # ---------- Step 2: overall bbox --------------------------------------------
@@ -44,12 +44,13 @@ def render_overall_bbox(user_prompt: str) -> str:
     )
 
 
-# ---------- Step 3: children decomposition ----------------------------------
+# ---------- Step 3: children decomposition (zones) --------------------------
 
 
 class ChildNodeSpec(BaseModel):
     id: str
     prompt: str
+    plan: str
     relationships: list[Relationship] = Field(default_factory=list)
 
 
@@ -67,7 +68,16 @@ individual objects. Furniture, fixtures, props, plants, and other concrete \
 objects are NOT child nodes — they are materialized later by the generation \
 pipeline, which fills leaf zones with objects.
 
-Given the current zone's prompt, bbox, and id, produce either:
+You are given:
+  * The current zone being decomposed (its id, prompt, bbox).
+  * The PRIOR SCENE CONTEXT — the overall scene prompt plus every zone \
+    already declared anywhere in the scene (parents, grandparents, \
+    previously-placed uncles and their subtrees). Each prior zone lists \
+    its prompt and PLAN. Use this to stay coherent with the rest of the \
+    scene: don't contradict a sibling's plan, don't duplicate a concept \
+    another zone already owns, and respect the overall scene's direction.
+
+Produce either:
   (a) `is_atomic = true, children = []` — this zone is a LEAF: its next \
       level of detail is individual objects, not further sub-zones. STOP \
       here. Good leaf-zone names describe a region, not a thing: \
@@ -83,8 +93,26 @@ Given the current zone's prompt, bbox, and id, produce either:
       "showerhead", "sink".
 
 For each child zone, emit:
-  * `id` — unique within this zone.
-  * `prompt` — a detailed description of the child zone.
+  * `id` — unique within the whole scene (do not collide with any id in \
+    the prior scene context).
+  * `prompt` — a short concrete description of the child zone (what it is).
+  * `plan` — a HIGH-LEVEL, ABSTRACT vision for this child zone. This is \
+    the ONLY way information flows forward: when the child is later \
+    decomposed or populated with objects, the downstream LLM will read \
+    this plan as context. It MUST:
+      - capture intent, mood, function, and spatial character — "what \
+        this zone is *for* and *feels like*".
+      - stay ABSTRACT. Do NOT prescribe specific objects, counts, \
+        dimensions, materials, colors, or brands. Do NOT dictate what \
+        sub-zones the child must contain. Downstream LLMs still need \
+        agency to make those decisions.
+      - be at most ~3 sentences.
+      Good: "A calm, utilitarian toilet area prioritising quick access \
+      and easy cleaning. The mood is clinical rather than spa-like."
+      Bad: "The toilet area contains a Toto porcelain toilet with a \
+      heated seat, a wall-mounted toilet paper holder, and a framed \
+      mirror above a pedestal sink." (too specific — removes downstream \
+      agency)
   * `relationships` — how the child is anchored inside this zone. Every \
     child MUST have at least one relationship.
 
@@ -106,17 +134,42 @@ Emit via the `emit` tool. No prose outside the tool call.\
 """
 
 
-def render_children_decomp(*, prompt: str, bbox: BoundingBox, parent_id: str) -> str:
+def render_children_decomp(
+    *,
+    prompt: str,
+    bbox: BoundingBox,
+    parent_id: str,
+    scene_prompt: str,
+    prior_zones: list[tuple[str, str, str | None, str | None]],
+) -> str:
+    """prior_zones: list of (id, prompt, plan, parent_id) for every zone
+    already declared in the run, in declaration order. Plan is None only
+    for the root."""
+    if prior_zones:
+        lines = []
+        for zid, zprompt, zplan, zparent in prior_zones:
+            plan_text = zplan if zplan is not None else "(root scene — no plan)"
+            lines.append(
+                f"  - id={zid!r} parent={zparent!r}\n"
+                f"    prompt: {zprompt}\n"
+                f"    plan: {plan_text}"
+            )
+        prior_block = "\n".join(lines)
+    else:
+        prior_block = "  (none)"
     return (
-        f"PARENT_ID: {parent_id!r}\n"
+        f"Overall scene prompt: {scene_prompt!r}\n\n"
+        f"Prior zones declared so far:\n{prior_block}\n\n"
+        f"PARENT_ID (the zone being decomposed): {parent_id!r}\n"
         f"Parent prompt: {prompt!r}\n"
         f"Parent bbox: {bbox.model_dump()}\n\n"
-        "Decompose this node. Either mark it atomic, or list its children "
-        "and each child's relationships to the parent / earlier siblings."
+        "Decompose this node. Either mark it atomic, or list its children, "
+        "each with an id, prompt, HIGH-LEVEL abstract plan, and "
+        "relationships to the parent / earlier siblings."
     )
 
 
-# ---------- Step 4: bbox resolution (one call per child) --------------------
+# ---------- Step 4: zone bbox resolution (one call per child zone) ----------
 
 
 class BboxResolveOutput(BaseModel):
@@ -124,7 +177,7 @@ class BboxResolveOutput(BaseModel):
 
 
 SYSTEM_BBOX_RESOLVE = """\
-You are placing a single child node inside a parent zone. Produce the \
+You are placing a single child ZONE inside a parent zone. Produce the \
 child's axis-aligned bounding box.
 
 Inputs:
@@ -143,8 +196,7 @@ Produce a bbox that:
     anchored near the named corner of the target, in the direction \
     implied by `kind` (e.g. ABOVE → higher y; BESIDE → adjacent on x or z; \
     ON → resting on the target's top face; ATTACHED → touching the target).
-  * Has dimensions appropriate to the child's prompt (size a chair like a \
-    chair, a wardrobe like a wardrobe).
+  * Has dimensions appropriate to the child's prompt.
 
 Coordinates in meters, centimeter precision (multiples of 0.01). Use a \
 signed `dimensions` vector from an `origin` vertex; sign chooses \
@@ -185,99 +237,228 @@ def render_bbox_resolve(
     )
 
 
-# ---------- Step 5: frame decider -------------------------------------------
+# ---------- Step 5: object decomposition (Phase 2) --------------------------
 
 
-class PlaneFrameSpec(BaseModel):
-    kind: Literal["plane"] = "plane"
-    id: str
-    origin: Vec3Tuple
-    u_axis: Vec3Tuple
-    v_axis: Vec3Tuple
+class ObjectSpec(ChildNodeSpec):
+    """A single object in a zone. Inherits id/prompt/relationships."""
+
+    parent: str
 
 
-class CurveFrameSpec(BaseModel):
-    kind: Literal["curve"] = "curve"
-    id: str
-    control_points: list[Vec3Tuple] = Field(min_length=2)
-    height: float = Field(gt=0.0)
+class ObjectDecompOutput(BaseModel):
+    objects: list[ObjectSpec] = Field(default_factory=list)
 
 
-class GeneratedFrameSpec(BaseModel):
-    kind: Literal["generated"] = "generated"
-    id: str
-    prompt: str = Field(min_length=1)
+SYSTEM_OBJECT_DECOMP = """\
+You are populating a 3D scene ZONE with the individual OBJECTS that belong \
+inside it. This is Phase 2 of the pipeline — zone decomposition is already \
+done; you are now enumerating concrete things: furniture, fixtures, props, \
+architectural shells, vegetation, etc.
 
+You operate in one of two MODES:
 
-FrameSpec = PlaneFrameSpec | CurveFrameSpec | GeneratedFrameSpec
+* ANCHOR mode — the zone is an atomic leaf (e.g. "meeting room", "toilet \
+  area"). Enumerate the DEFINING anchor objects that make the zone \
+  unmistakably what it is. A meeting room: a large table, chairs around \
+  it, a TV on the end wall. A toilet area: a toilet, a toilet paper \
+  holder. Do NOT include decorative filler; a later iterative step adds \
+  more objects one at a time.
 
+* ENCAPSULATING mode — the zone is about to be decomposed further, but \
+  first we need the geometry that ENCAPSULATES it: the walls, ceiling, \
+  floor, enclosing fence, moat, cliff face — whatever physically bounds \
+  this zone. Emit one object per encapsulating element. Each object's \
+  prompt is sent verbatim to a text-to-3D model, so describe it as a \
+  concrete artifact ("a tall stone wall with ivy", "a wooden plank floor", \
+  "a moat filled with murky water") not as an abstract primitive.
 
-class FrameDeciderOutput(BaseModel):
-    needs_frame: bool
-    frames: list[FrameSpec] = Field(default_factory=list)
+For each object, emit:
+  * `id` — unique within this call.
+  * `prompt` — a detailed description of the object; will be used verbatim \
+    as a text-to-3D generation prompt.
+  * `parent` — the SEMANTIC parent. Either the enclosing zone id (provided \
+    below as ZONE_ID), or the id of ANOTHER object in this list that this \
+    one belongs to. A lamp resting on a desk: the lamp's parent is the \
+    desk. A book on a shelf: the book's parent is the shelf. Parent does \
+    NOT imply spatial containment — a lamp's bbox is NOT inside the \
+    desk's bbox; it sits on top.
+  * `relationships` — how this object is anchored spatially. AT LEAST ONE \
+    relationship MUST have `target == parent` (this is the primary \
+    anchor). Additional relationships may target sibling objects (i.e. \
+    other objects listed in this call).
 
+A Relationship has:
+  * `target` — the parent (zone or another object in this list) or a \
+    sibling object in this list.
+  * `kind` — one of: ON, BESIDE, BELOW, ABOVE, ATTACHED.
+  * `reference_point` — a corner of the TARGET's bbox under the canonical \
+    front view (+X right, +Y up, +Z front). One of: TOP_LEFT_FRONT, \
+    TOP_LEFT_BACK, TOP_RIGHT_FRONT, TOP_RIGHT_BACK, BOTTOM_LEFT_FRONT, \
+    BOTTOM_LEFT_BACK, BOTTOM_RIGHT_FRONT, BOTTOM_RIGHT_BACK.
 
-SYSTEM_FRAME_DECIDER = """\
-You are deciding the architectural boundary geometry for a zone: its \
-WALLS, CEILING, and FLOOR. Nothing else.
-
-Frames define the containing surfaces of a zone. They are NOT used to \
-generate objects (furniture, fixtures, decorations, roofs, overhangs, \
-columns, railings, planters) — those belong to the generation pipeline, \
-not here. Scope of frames is strictly walls, ceilings, floors.
-
-Frame types:
-* `plane` — a flat rectangular surface defined by `origin`, `u_axis`, and \
-  `v_axis` in world space. Use for rectilinear walls, floors, and ceilings. \
-  `u_axis` and `v_axis` must be perpendicular and lie within the plane.
-* `curve` — a vertically-extruded surface whose horizontal footprint is a \
-  SMOOTH Catmull-Rom spline through `control_points` (so a full circle \
-  needs only ~6-8 points, not a dense polyline). `height` is the vertical \
-  extrusion above the footprint. Use for curved walls (circular chambers, \
-  cylindrical towers, arcs).
-* `generated` — LAST-RESORT hatch for walls/ceilings/floors whose shape \
-  is too complex for planes or curves (e.g. a vaulted cathedral ceiling, \
-  an organic cave wall, a domed roof). A text-to-3D model produces a \
-  single hollow shell from your `prompt`, rescaled into the zone bbox. \
-  USE SPARINGLY — planes and curves are crisper, cheaper, and more \
-  predictable. The `prompt` is sent verbatim to the 3D model and MUST \
-  describe a HOLLOW SHELL only — no furniture, no props, no decorations, \
-  no free-standing architectural features. Start it with "hollow" and \
-  describe openings as rectangular/arched CUTOUTS on specific faces, not \
-  as "windows" or "doors". Use abstract geometric primitives (hollow box, \
-  cylinder, dome, vaulted arch, cone, slab) — never named objects \
-  ("house", "chapel", "cave"). Do NOT use `generated` for anything that \
-  is not a wall, ceiling, or floor.
-
-CLOSED vs OPEN curves:
-* If a curve's polyline closes on itself (repeat the first control point \
-  as the last), the renderer treats it as a fully enclosed chamber and \
-  automatically caps floor and ceiling — so a single closed curve describes \
-  the entire wall + floor + ceiling of the zone. Do NOT emit extra `plane` \
-  frames for its floor or ceiling.
-* If the polyline is open (does not close), no caps are added; use this \
-  for a partial curved wall (river bank, arena rim).
-
-Guidance:
-* Indoor rectilinear rooms: emit `plane` frames for floor + walls + \
-  ceiling (typically 6 planes for a box room).
-* Indoor curved/round rooms: emit ONE closed `curve` frame.
-* Genuinely complex shells where planes + curves cannot express the \
-  wall/ceiling/floor geometry: ONE `generated` frame. Do NOT mix it with \
-  plane/curve frames — the generated mesh IS the whole shell.
-* Outdoor open areas (fields, courtyards, gardens): no frames \
-  (`needs_frame = false`).
-
-All coordinates are Y-up, right-handed, meters, under the canonical front \
-view (+X right, +Y up, +Z front).
+The parent graph across listed objects must form a DAG (no cycles). Do \
+NOT pick concrete coordinates here — a downstream step resolves each \
+object's bbox.
 
 Emit via the `emit` tool. No prose outside the tool call.\
 """
 
 
-def render_frame_decider(*, prompt: str, bbox: BoundingBox) -> str:
+def render_object_decomp(
+    *,
+    zone_id: str,
+    zone_prompt: str,
+    zone_bbox: BoundingBox,
+    scenario: Literal["anchor", "encapsulating"],
+) -> str:
+    mode = "ANCHOR" if scenario == "anchor" else "ENCAPSULATING"
     return (
-        f"Zone prompt: {prompt!r}\n"
-        f"Zone bbox: {bbox.model_dump()}\n\n"
-        "Decide whether this zone needs frame geometry. If so, specify every frame."
+        f"MODE: {mode}\n"
+        f"ZONE_ID: {zone_id!r}\n"
+        f"Zone prompt: {zone_prompt!r}\n"
+        f"Zone bbox: {zone_bbox.model_dump()}\n\n"
+        "List the objects for this zone in the mode above. Each object has "
+        "an id, prompt, parent (zone id or another object in this list), "
+        "and at least one relationship whose target is its parent."
+    )
+
+
+# ---------- Step 6: object bbox resolution ----------------------------------
+
+
+SYSTEM_OBJECT_BBOX_RESOLVE = """\
+You are placing a single OBJECT inside a zone. Produce its axis-aligned \
+bounding box.
+
+Key difference from zone placement: the object's SEMANTIC parent does NOT \
+constrain its bbox. A lamp's parent is the desk it sits on, but the lamp's \
+bbox is NOT inside the desk's bbox — the lamp sits above the desk, \
+anchored by an ON relationship. Let the RELATIONSHIPS drive placement, not \
+the parent pointer.
+
+Inputs:
+  * Zone bbox — the overall region being populated. The object should sit \
+    realistically inside the zone.
+  * The object's parent — either the zone or another object — with its \
+    bbox, for context.
+  * Peers already placed (id, bbox, parent_id). The object must NOT \
+    overlap any peer that shares its same parent (touching faces are OK; \
+    overlapping by more than 1cm on all three axes is not). Peers with a \
+    different parent are NOT constrained against this object.
+  * Object prompt (what it is).
+  * Relationships — each targets either the parent or a peer by id. \
+    `kind` is ON / BESIDE / BELOW / ABOVE / ATTACHED. `reference_point` \
+    is a corner of the TARGET's bbox under the canonical front view \
+    (+X right, +Y up, +Z front).
+
+Produce a bbox that:
+  * Has dimensions appropriate to the object's prompt (size a chair like \
+    a chair, a wall like a wall, a moat like a moat).
+  * Respects every relationship (anchor near the named corner in the \
+    direction the `kind` implies).
+  * Does not overlap any peer sharing the same parent.
+  * Sits realistically inside the zone bbox.
+
+Coordinates in meters, centimeter precision (multiples of 0.01). Signed \
+`dimensions` from an `origin` vertex.
+
+Emit via the `emit` tool. No prose outside the tool call.\
+"""
+
+
+def render_object_bbox_resolve(
+    *,
+    zone_id: str,
+    zone_bbox: BoundingBox,
+    object_id: str,
+    object_prompt: str,
+    parent_id: str,
+    parent_kind: Literal["zone", "object"],
+    parent_bbox: BoundingBox,
+    peers: list[tuple[str, BoundingBox, str | None]],
+    relationships: list[Relationship],
+) -> str:
+    peer_lines = (
+        "\n".join(
+            f"  - {pid}: bbox={pbbox.model_dump()} parent={pparent!r}"
+            for pid, pbbox, pparent in peers
+        )
+        if peers
+        else "  (none)"
+    )
+    rel_lines = "\n".join(
+        f"  - target={r.target!r} kind={r.kind.value} reference_point={r.reference_point.value}"
+        for r in relationships
+    ) or "  (none)"
+    return (
+        f"Zone id: {zone_id!r}\n"
+        f"Zone bbox: {zone_bbox.model_dump()}\n\n"
+        f"Object id: {object_id!r}\n"
+        f"Object prompt: {object_prompt!r}\n"
+        f"Semantic parent ({parent_kind}): {parent_id!r}\n"
+        f"Parent bbox: {parent_bbox.model_dump()}\n\n"
+        f"Peers already placed:\n{peer_lines}\n\n"
+        f"Relationships:\n{rel_lines}\n\n"
+        "Produce this object's bounding box."
+    )
+
+
+# ---------- Step 7: iterative next-object decision --------------------------
+
+
+class NextObjectOutput(BaseModel):
+    done: bool
+    object: ObjectSpec | None = None
+
+
+SYSTEM_NEXT_OBJECT = """\
+You are iteratively populating a 3D scene zone with anchor objects. Given \
+the CURRENT state of the scene, decide whether another object should be \
+added to THIS zone to make it feel complete.
+
+Err on the side of `done = true`. Prefer "this zone has what it needs" \
+over adding clutter. Only add another object if there is a clearly \
+missing element that belongs in this zone.
+
+If `done = true`, leave `object` null and stop.
+
+If `done = false`, emit EXACTLY ONE object. Same rules as the bulk \
+decomposition step:
+  * Unique `id` (not colliding with any existing node in the scene).
+  * `prompt` — a detailed description; used verbatim for text-to-3D.
+  * `parent` — either this zone's id, or the id of ANY already-placed \
+    node in the scene (typically an object already placed in THIS zone, \
+    like a cup on a previously-placed desk).
+  * `relationships` — at least one MUST have `target == parent`. \
+    Additional relationships may target already-placed objects.
+
+Parent is semantic ("belongs to"), not a spatial containment constraint.
+
+Emit via the `emit` tool. No prose outside the tool call.\
+"""
+
+
+def render_next_object(
+    *,
+    zone_id: str,
+    zone_prompt: str,
+    zone_bbox: BoundingBox,
+    scene: list[tuple[str, str, BoundingBox, str | None]],
+) -> str:
+    scene_lines = (
+        "\n".join(
+            f"  - {nid}: prompt={prompt!r} bbox={bbox.model_dump()} parent={pid!r}"
+            for nid, prompt, bbox, pid in scene
+        )
+        if scene
+        else "  (none)"
+    )
+    return (
+        f"ZONE_ID: {zone_id!r}\n"
+        f"Zone prompt: {zone_prompt!r}\n"
+        f"Zone bbox: {zone_bbox.model_dump()}\n\n"
+        f"Current scene (every node placed so far across the run):\n{scene_lines}\n\n"
+        "Decide whether another object is needed in this zone. "
+        "If yes, emit exactly one ObjectSpec; otherwise set done=true."
     )
