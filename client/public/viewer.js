@@ -135,6 +135,66 @@ controls.addEventListener("start", () => {
   cameraUserMoved = true;
 });
 
+// --- WASD fly controls (complementary to OrbitControls) --------------------
+// WASD strafes on the horizontal plane relative to the camera direction;
+// Q/E moves world-down/up; Shift multiplies speed. Translates camera and
+// target together so OrbitControls' pivot follows the camera.
+const pressedKeys = new Set();
+let _lastMoveT = performance.now();
+const _MOVE_KEYS = new Set(["w", "a", "s", "d", "q", "e"]);
+
+function _isTypingTarget(t) {
+  return t instanceof HTMLElement &&
+    (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+}
+
+window.addEventListener("keydown", (ev) => {
+  if (_isTypingTarget(ev.target)) return;
+  const k = ev.key.toLowerCase();
+  if (_MOVE_KEYS.has(k)) {
+    pressedKeys.add(k);
+    ev.preventDefault();
+  } else if (k === "shift") {
+    pressedKeys.add("shift");
+  }
+});
+
+window.addEventListener("keyup", (ev) => {
+  pressedKeys.delete(ev.key.toLowerCase());
+});
+
+// Alt-tab / focus-loss: drop held keys so they don't stick on.
+window.addEventListener("blur", () => pressedKeys.clear());
+
+const _fwd = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _worldUp = new THREE.Vector3(0, 1, 0);
+const _move = new THREE.Vector3();
+
+function _applyKeyboardMove(dt) {
+  if (pressedKeys.size === 0) return;
+  const speed = 2 * (pressedKeys.has("shift") ? 3 : 1) * dt;
+
+  _fwd.subVectors(controls.target, camera.position);
+  _fwd.y = 0;
+  if (_fwd.lengthSq() === 0) return;
+  _fwd.normalize();
+  _right.crossVectors(_fwd, _worldUp).normalize();
+
+  _move.set(0, 0, 0);
+  if (pressedKeys.has("w")) _move.addScaledVector(_fwd, speed);
+  if (pressedKeys.has("s")) _move.addScaledVector(_fwd, -speed);
+  if (pressedKeys.has("d")) _move.addScaledVector(_right, speed);
+  if (pressedKeys.has("a")) _move.addScaledVector(_right, -speed);
+  if (pressedKeys.has("e")) _move.addScaledVector(_worldUp, speed);
+  if (pressedKeys.has("q")) _move.addScaledVector(_worldUp, -speed);
+
+  if (_move.lengthSq() === 0) return;
+  camera.position.add(_move);
+  controls.target.add(_move);
+  cameraUserMoved = true;
+}
+
 scene.add(new THREE.HemisphereLight(0xffffff, 0x202028, 0.9));
 const dir = new THREE.DirectionalLight(0xffffff, 0.9);
 dir.position.set(8, 12, 6);
@@ -150,6 +210,10 @@ window.addEventListener("resize", () => {
 
 function animate() {
   requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - _lastMoveT) / 1000);
+  _lastMoveT = now;
+  _applyKeyboardMove(dt);
   controls.update();
   renderer.render(scene, camera);
 }
