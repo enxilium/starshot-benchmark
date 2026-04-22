@@ -59,21 +59,33 @@ class ChildrenDecompOutput(BaseModel):
 
 
 SYSTEM_CHILDREN_DECOMP = """\
-You are decomposing a 3D scene (a Node) into its direct children.
+You are decomposing a 3D scene ZONE (a Node) into its direct child zones.
 
-You receive the current node's prompt, its bounding box, and its id. You \
-produce either:
-  (a) `is_atomic = true, children = []` — this node should NOT be broken \
-      down further (it is an indivisible object, e.g. a single chair, a \
-      toilet area, a tree). Atomic nodes flow directly into the generation \
-      pipeline downstream.
-  (b) `is_atomic = false, children = [...]` — list the child subzones / \
-      objects that compose this node.
+EVERY node in this pipeline is a spatial zone — a bounded region of the \
+scene (a room, a sub-area of a room, an outdoor quadrant). Zones are NEVER \
+individual objects. Furniture, fixtures, props, plants, and other concrete \
+objects are NOT child nodes — they are materialized later by the generation \
+pipeline, which fills leaf zones with objects.
 
-For each child, emit:
-  * `id` — unique within this node.
-  * `prompt` — a detailed description of that child subzone / object.
-  * `relationships` — how the child is anchored inside this node. Every \
+Given the current zone's prompt, bbox, and id, produce either:
+  (a) `is_atomic = true, children = []` — this zone is a LEAF: its next \
+      level of detail is individual objects, not further sub-zones. STOP \
+      here. Good leaf-zone names describe a region, not a thing: \
+      "toilet area", "shower area", "vanity area", "desk area", \
+      "reading nook", "seating area", "garden bed". BAD leaf-zone names \
+      describe a single object: "toilet", "showerhead", "sink", "chair", \
+      "tree" — never emit these; the generation pipeline handles \
+      individual objects.
+  (b) `is_atomic = false, children = [...]` — this zone contains distinct \
+      spatial sub-zones. Each child MUST itself be a zone (a bounded \
+      region), never a single object. A bathroom decomposes into \
+      "toilet area", "shower area", "vanity area" — NOT into "toilet", \
+      "showerhead", "sink".
+
+For each child zone, emit:
+  * `id` — unique within this zone.
+  * `prompt` — a detailed description of the child zone.
+  * `relationships` — how the child is anchored inside this zone. Every \
     child MUST have at least one relationship.
 
 A Relationship has:
@@ -206,51 +218,55 @@ class FrameDeciderOutput(BaseModel):
 
 
 SYSTEM_FRAME_DECIDER = """\
-You are building a 3D scene. Given a zone (its prompt and bounding box), \
-decide whether it needs FRAME geometry — the walls, floor, ceiling, or \
-other structural surfaces that define its container — and if so, specify \
-the frames.
+You are deciding the architectural boundary geometry for a zone: its \
+WALLS, CEILING, and FLOOR. Nothing else.
+
+Frames define the containing surfaces of a zone. They are NOT used to \
+generate objects (furniture, fixtures, decorations, roofs, overhangs, \
+columns, railings, planters) — those belong to the generation pipeline, \
+not here. Scope of frames is strictly walls, ceilings, floors.
 
 Frame types:
 * `plane` — a flat rectangular surface defined by `origin`, `u_axis`, and \
   `v_axis` in world space. Use for rectilinear walls, floors, and ceilings. \
-  u_axis and v_axis should be perpendicular and lie within the plane.
+  `u_axis` and `v_axis` must be perpendicular and lie within the plane.
 * `curve` — a vertically-extruded surface whose horizontal footprint is a \
-  SMOOTH SPLINE. The `control_points` you supply are spline control points \
-  (NOT a literal polyline) — the renderer passes a smooth Catmull-Rom curve \
-  through them, so a circle only needs ~6-8 points, an ellipse ~8-10, a \
-  gentle bend ~3-4. `height` is the vertical extrusion above the polyline.
-* `generated` — escape hatch: a text-to-3D model (Hunyuan) produces the \
-  enclosure as a single mesh, which we rescale into this zone's bbox. \
-  The `prompt` is sent verbatim to Hunyuan; it MUST be crafted to produce \
-  ONLY A HOLLOW SHELL, not a furnished scene:
-
-  (1) ABSTRACT SHAPES ONLY — describe the shell as a composition of \
-  geometric primitives (hollow box, cylinder, dome, triangular prism, \
-  overhang, slab, arch, ridge, cone, rectangular cutout). DO NOT use \
-  named objects like "house", "cave", "church".
-
-  (2) START with the word "hollow" and repeat emptiness constraints: \
-  "empty interior", "shell only", "no contents", "no furniture".
-
-  (3) Describe openings as RECTANGULAR CUTOUTS or ARCHED CUTOUTS on \
-  specific faces, not as "windows" or "doors".
-
-  (4) No materials, colors, textures, styles, decorations, or surroundings.
+  SMOOTH Catmull-Rom spline through `control_points` (so a full circle \
+  needs only ~6-8 points, not a dense polyline). `height` is the vertical \
+  extrusion above the footprint. Use for curved walls (circular chambers, \
+  cylindrical towers, arcs).
+* `generated` — LAST-RESORT hatch for walls/ceilings/floors whose shape \
+  is too complex for planes or curves (e.g. a vaulted cathedral ceiling, \
+  an organic cave wall, a domed roof). A text-to-3D model produces a \
+  single hollow shell from your `prompt`, rescaled into the zone bbox. \
+  USE SPARINGLY — planes and curves are crisper, cheaper, and more \
+  predictable. The `prompt` is sent verbatim to the 3D model and MUST \
+  describe a HOLLOW SHELL only — no furniture, no props, no decorations, \
+  no free-standing architectural features. Start it with "hollow" and \
+  describe openings as rectangular/arched CUTOUTS on specific faces, not \
+  as "windows" or "doors". Use abstract geometric primitives (hollow box, \
+  cylinder, dome, vaulted arch, cone, slab) — never named objects \
+  ("house", "chapel", "cave"). Do NOT use `generated` for anything that \
+  is not a wall, ceiling, or floor.
 
 CLOSED vs OPEN curves:
-* If a curve's polyline CLOSES on itself (repeat the first control point \
+* If a curve's polyline closes on itself (repeat the first control point \
   as the last), the renderer treats it as a fully enclosed chamber and \
-  automatically caps floor and ceiling. Do NOT emit additional `plane` \
+  automatically caps floor and ceiling — so a single closed curve describes \
+  the entire wall + floor + ceiling of the zone. Do NOT emit extra `plane` \
   frames for its floor or ceiling.
-* If open, no caps are added; use this for a river wall, arena rim, etc.
+* If the polyline is open (does not close), no caps are added; use this \
+  for a partial curved wall (river bank, arena rim).
 
 Guidance:
-* Indoor rectilinear rooms: emit `plane` frames for floor + walls + ceiling.
+* Indoor rectilinear rooms: emit `plane` frames for floor + walls + \
+  ceiling (typically 6 planes for a box room).
 * Indoor curved/round rooms: emit ONE closed `curve` frame.
-* Architecturally complex or organic enclosures: emit ONE `generated` \
-  frame; do NOT mix it with plane/curve frames.
-* Outdoor open areas (fields, rivers, courtyards): no frames.
+* Genuinely complex shells where planes + curves cannot express the \
+  wall/ceiling/floor geometry: ONE `generated` frame. Do NOT mix it with \
+  plane/curve frames — the generated mesh IS the whole shell.
+* Outdoor open areas (fields, courtyards, gardens): no frames \
+  (`needs_frame = false`).
 
 All coordinates are Y-up, right-handed, meters, under the canonical front \
 view (+X right, +Y up, +Z front).

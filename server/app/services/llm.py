@@ -2,6 +2,10 @@
 
 The model is run-global. Configure it once via `set_model()` at the start
 of a run; every subsequent `call_llm()` uses it.
+
+One retry on parse / validation failures: Claude on OpenRouter occasionally
+leaks its native XML tool-use syntax into the `arguments` field, and a
+resample usually recovers.
 """
 
 from __future__ import annotations
@@ -9,7 +13,9 @@ from __future__ import annotations
 import os
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+
+from app.utils import logging
 
 _URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -48,11 +54,23 @@ async def call_llm[T: BaseModel](
         "tool_choice": {"type": "function", "function": {"name": "emit"}},
         "max_tokens": 4096,
     }
-    async with httpx.AsyncClient(timeout=180.0) as http:
-        resp = await http.post(
-            _URL,
-            headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
-            json=body,
-        )
-    args = resp.json()["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
-    return output_schema.model_validate_json(args)
+    for attempt in range(2):
+        async with httpx.AsyncClient(timeout=180.0) as http:
+            resp = await http.post(
+                _URL,
+                headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
+                json=body,
+            )
+        data = resp.json()
+        if "choices" not in data:
+            raise RuntimeError(f"OpenRouter HTTP {resp.status_code}: {data}")
+        try:
+            args = data["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            if isinstance(args, dict):
+                return output_schema.model_validate(args)
+            return output_schema.model_validate_json(args)
+        except (ValidationError, ValueError, KeyError, IndexError, TypeError) as e:
+            if attempt == 1:
+                raise
+            logging.log("llm.retry", reason=f"{type(e).__name__}: {str(e)[:160]}")
+    raise AssertionError("unreachable")

@@ -128,6 +128,13 @@ controls.dampingFactor = 0.08;
 controls.target.set(0, 1, 0);
 controls.update();
 
+// Once the user drags the camera, stop auto-fitting so subsequent runs
+// preserve their chosen angle. The flag deliberately survives clearScene.
+let cameraUserMoved = false;
+controls.addEventListener("start", () => {
+  cameraUserMoved = true;
+});
+
 scene.add(new THREE.HemisphereLight(0xffffff, 0x202028, 0.9));
 const dir = new THREE.DirectionalLight(0xffffff, 0.9);
 dir.position.set(8, 12, 6);
@@ -171,7 +178,9 @@ function clearScene() {
 }
 
 // Fit controls to the union of all loaded models after each addition.
+// Skipped once the user has manually adjusted the camera.
 function fitToScene() {
+  if (cameraUserMoved) return;
   const box = new THREE.Box3().setFromObject(sceneRoot);
   if (box.isEmpty()) return;
   const size = box.getSize(new THREE.Vector3());
