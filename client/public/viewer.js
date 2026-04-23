@@ -13,6 +13,11 @@ const logEl = document.getElementById("log");
 const formEl = document.getElementById("prompt-form");
 const inputEl = document.getElementById("prompt-input");
 const submitEl = document.getElementById("prompt-submit");
+const assetsEl = document.getElementById("assets");
+const assetsBodyEl = document.getElementById("assets-body");
+const assetsCountEl = document.getElementById("assets-count");
+const assetsHeaderEl = document.getElementById("assets-header");
+const assetsToggleEl = document.getElementById("assets-toggle");
 
 // --- log panel --------------------------------------------------------------
 
@@ -21,6 +26,7 @@ const KIND_COLOR = {
   "run.done": "#8bd17c",
   "run.error": "#ff8080",
   "bbox": "#e0c271",
+  "image": "#f6a96a",
   "model": "#c586d1",
 };
 
@@ -74,6 +80,88 @@ function appendEvent(event) {
 function clearLog() {
   logEl.innerHTML = "";
 }
+
+// --- asset browser ----------------------------------------------------------
+
+// id -> { imageUrl, prompt, modelUrl, status: "pending" | "loaded" | "error", errorMessage }
+const assets = new Map();
+
+function assetStatus(a) {
+  return a.status ?? "pending";
+}
+
+function upsertAsset(id, patch) {
+  const cur = assets.get(id) ?? { imageUrl: null, prompt: null, modelUrl: null, status: "pending" };
+  assets.set(id, { ...cur, ...patch });
+  renderAsset(id);
+  assetsCountEl.textContent = `(${assets.size})`;
+}
+
+function renderAsset(id) {
+  const a = assets.get(id);
+  if (!a) return;
+  let card = assetsBodyEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
+  if (!card) {
+    card = document.createElement("div");
+    card.className = "asset-card";
+    card.dataset.id = id;
+    card.innerHTML = `
+      <a class="asset-thumb-link" target="_blank" rel="noopener">
+        <div class="asset-thumb placeholder">no image</div>
+      </a>
+      <div class="asset-body">
+        <div class="asset-id"></div>
+        <div class="asset-status pending">pending</div>
+        <div class="asset-prompt"></div>
+      </div>
+    `;
+    assetsBodyEl.appendChild(card);
+    const promptEl = card.querySelector(".asset-prompt");
+    promptEl.addEventListener("click", () => {
+      promptEl.classList.toggle("expanded");
+    });
+  }
+  card.querySelector(".asset-id").textContent = id;
+
+  const status = assetStatus(a);
+  card.className = `asset-card status-${status}`;
+  const statusTag = card.querySelector(".asset-status");
+  statusTag.className = `asset-status ${status}`;
+  statusTag.textContent = status === "error" && a.errorMessage
+    ? `error: ${a.errorMessage}`
+    : status;
+
+  const link = card.querySelector(".asset-thumb-link");
+  const thumb = card.querySelector(".asset-thumb");
+  if (a.imageUrl) {
+    const absImg = new URL(a.imageUrl, SERVER_URL).toString();
+    link.href = absImg;
+    if (thumb.tagName !== "IMG") {
+      const img = document.createElement("img");
+      img.className = "asset-thumb";
+      img.loading = "lazy";
+      img.alt = id;
+      img.src = absImg;
+      thumb.replaceWith(img);
+    } else if (thumb.src !== absImg) {
+      thumb.src = absImg;
+    }
+  }
+
+  const promptEl = card.querySelector(".asset-prompt");
+  promptEl.textContent = a.prompt ?? "";
+}
+
+function clearAssets() {
+  assets.clear();
+  assetsBodyEl.innerHTML = "";
+  assetsCountEl.textContent = "(0)";
+}
+
+assetsHeaderEl.addEventListener("click", () => {
+  const collapsed = assetsEl.classList.toggle("collapsed");
+  assetsToggleEl.textContent = collapsed ? "▸" : "▾";
+});
 
 // --- three.js scene ---------------------------------------------------------
 
@@ -200,7 +288,65 @@ const dir = new THREE.DirectionalLight(0xffffff, 0.9);
 dir.position.set(8, 12, 6);
 scene.add(dir);
 scene.add(new THREE.AxesHelper(1));
-scene.add(new THREE.GridHelper(20, 20, 0x404040, 0x202020));
+
+// Infinite ground grid: a huge plane with a procedural grid shader. Lines
+// antialias via screen-space derivatives and fade with distance so the plane
+// never looks like it has an edge. Fade distance is driven from camera
+// distance each frame so detail scales naturally as the user zooms.
+const gridGeom = new THREE.PlaneGeometry(100000, 100000);
+gridGeom.rotateX(-Math.PI / 2);
+const gridMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uCameraPos: { value: new THREE.Vector3() },
+    uMinorColor: { value: new THREE.Color(0x202020) },
+    uMajorColor: { value: new THREE.Color(0x505050) },
+    uMinorSpacing: { value: 1.0 },
+    uMajorSpacing: { value: 10.0 },
+    uFadeStart: { value: 20.0 },
+    uFadeEnd: { value: 200.0 },
+  },
+  vertexShader: `
+    varying vec3 vWorldPos;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWorldPos = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }
+  `,
+  fragmentShader: `
+    uniform vec3 uCameraPos;
+    uniform vec3 uMinorColor;
+    uniform vec3 uMajorColor;
+    uniform float uMinorSpacing;
+    uniform float uMajorSpacing;
+    uniform float uFadeStart;
+    uniform float uFadeEnd;
+    varying vec3 vWorldPos;
+
+    float gridLine(vec2 p, float spacing) {
+      vec2 q = p / spacing;
+      vec2 g = abs(fract(q - 0.5) - 0.5) / fwidth(q);
+      return 1.0 - min(min(g.x, g.y), 1.0);
+    }
+
+    void main() {
+      float minor = gridLine(vWorldPos.xz, uMinorSpacing);
+      float major = gridLine(vWorldPos.xz, uMajorSpacing);
+      float d = distance(vWorldPos.xz, uCameraPos.xz);
+      float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, d);
+      float alpha = max(minor * 0.5, major) * fade;
+      if (alpha < 0.002) discard;
+      vec3 col = mix(uMinorColor, uMajorColor, major);
+      gl_FragColor = vec4(col, alpha);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+});
+const groundGrid = new THREE.Mesh(gridGeom, gridMat);
+groundGrid.renderOrder = -1;
+scene.add(groundGrid);
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -215,6 +361,12 @@ function animate() {
   _lastMoveT = now;
   _applyKeyboardMove(dt);
   controls.update();
+
+  gridMat.uniforms.uCameraPos.value.copy(camera.position);
+  const camDist = Math.max(1, camera.position.distanceTo(controls.target));
+  gridMat.uniforms.uFadeStart.value = camDist * 0.5;
+  gridMat.uniforms.uFadeEnd.value = camDist * 6.0;
+
   renderer.render(scene, camera);
 }
 animate();
@@ -267,6 +419,7 @@ const loader = new GLTFLoader();
 
 async function loadModel(event) {
   const absUrl = new URL(event.url, SERVER_URL).toString();
+  upsertAsset(event.id, { modelUrl: event.url });
   try {
     const gltf = await loader.loadAsync(absUrl);
     gltf.scene.traverse((child) => {
@@ -278,8 +431,10 @@ async function loadModel(event) {
     gltf.scene.name = `${event.artifact_kind}:${event.id}`;
     sceneRoot.add(gltf.scene);
     fitToScene();
+    upsertAsset(event.id, { status: "loaded" });
   } catch (e) {
     appendEvent({ kind: "model.error", id: event.id, message: e.message });
+    upsertAsset(event.id, { status: "error", errorMessage: e.message });
   }
 }
 
@@ -374,6 +529,9 @@ function dispatch(event) {
     case "bbox":
       loadBbox(event);
       break;
+    case "image":
+      upsertAsset(event.id, { imageUrl: event.url, prompt: event.prompt });
+      break;
     case "model":
       loadModel(event);
       break;
@@ -405,6 +563,7 @@ async function startRun(prompt) {
   }
   clearScene();
   clearLog();
+  clearAssets();
   setRunning(true);
   setStatus("POST /generate …");
 

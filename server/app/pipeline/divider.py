@@ -1,14 +1,15 @@
 """Phase 1 — recursive top-down decomposition into a tree of zone Nodes.
 
 Flow per node:
-  1. Children decomposition (LLM) — atomic? or list of child zone specs.
-  2. Topologically order children by sibling relationships.
-  3. For each child zone:
+  1. Plan this zone (LLM) — produces the zone's north-star plan.
+  2. Children decomposition (LLM) — atomic? or list of child zone specs.
+  3. Topologically order children by sibling relationships.
+  4. For each child zone:
      a. Resolve bbox (LLM).
      b. Validate bbox (contained in parent, no sibling overlap).
      c. Hand to Phase 2 generation to produce its encapsulating geometry
         (walls, moat, fence, etc.) as objects.
-  4. Recurse on each child.
+  5. Recurse on each child.
 
 Atomic leaves skip the recursion and are handed to Phase 2 generation for
 anchor-object population.
@@ -28,9 +29,12 @@ from app.core.prompts import (
     SYSTEM_BBOX_RESOLVE,
     SYSTEM_CHILDREN_DECOMP,
     SYSTEM_OVERALL_BBOX,
+    SYSTEM_ZONE_PLAN,
+    ZonePlanOutput,
     render_bbox_resolve,
     render_children_decomp,
     render_overall_bbox,
+    render_zone_plan,
 )
 from app.core.types import BoundingBox, Node
 from app.pipeline import generation
@@ -48,28 +52,69 @@ async def _pick_overall_bbox(prompt: str) -> BoundingBox:
     return out.bbox
 
 
+def _prior_zones(all_nodes: list[Node]) -> list[tuple[str, str, str, str]]:
+    """Zones already declared AND planned, excluding the root (which is
+    surfaced separately as the scene plan)."""
+    out: list[tuple[str, str, str, str]] = []
+    for n in all_nodes:
+        if n.mesh_url is not None:
+            continue
+        if n.parent_id is None or n.plan is None:
+            continue
+        out.append((n.id, n.prompt, n.plan, n.parent_id))
+    return out
+
+
+async def _plan_zone(*, node: Node, all_nodes: list[Node]) -> str:
+    """Plan the given zone. Root is planned with no prior context; non-root
+    zones receive the scene plan + every already-planned zone."""
+    is_root = node.parent_id is None
+    if is_root:
+        scene_prompt = None
+        scene_plan = None
+        prior_zones: list[tuple[str, str, str, str]] = []
+    else:
+        root = all_nodes[0]
+        assert root.plan is not None, "root must be planned before any child"
+        scene_prompt = root.prompt
+        scene_plan = root.plan
+        prior_zones = _prior_zones(all_nodes)
+    out = await llm.call_llm(
+        system=SYSTEM_ZONE_PLAN,
+        user=render_zone_plan(
+            zone_id=node.id,
+            zone_prompt=node.prompt,
+            zone_bbox=node.bbox,
+            scene_prompt=scene_prompt,
+            scene_plan=scene_plan,
+            prior_zones=prior_zones,
+        ),
+        output_schema=ZonePlanOutput,
+    )
+    return out.plan
+
+
 async def _decompose(
     *,
-    prompt: str,
-    bbox: BoundingBox,
-    parent_id: str,
+    node: Node,
     all_nodes: list[Node],
 ) -> ChildrenDecompOutput:
-    # all_nodes[0] is always root. Zones have mesh_url is None; objects set it.
-    scene_prompt = all_nodes[0].prompt
-    prior_zones = [
-        (n.id, n.prompt, n.plan, n.parent_id)
-        for n in all_nodes
-        if n.mesh_url is None
-    ]
+    # all_nodes[0] is always root; its plan is the scene plan fetched at
+    # every decomposition step. The zone being decomposed already has its
+    # own plan set by _plan_zone right before this call.
+    root = all_nodes[0]
+    assert root.plan is not None, "root.plan must be set before decomposition"
+    assert node.plan is not None, "zone plan must be set before decomposition"
     return await llm.call_llm(
         system=SYSTEM_CHILDREN_DECOMP,
         user=render_children_decomp(
-            prompt=prompt,
-            bbox=bbox,
-            parent_id=parent_id,
-            scene_prompt=scene_prompt,
-            prior_zones=prior_zones,
+            prompt=node.prompt,
+            bbox=node.bbox,
+            plan=node.plan,
+            parent_id=node.id,
+            scene_prompt=root.prompt,
+            scene_plan=root.plan,
+            prior_zones=_prior_zones(all_nodes),
         ),
         output_schema=ChildrenDecompOutput,
     )
@@ -135,10 +180,17 @@ def _validate_zone_bboxes(
 async def _build(
     *, node: Node, runs_dir: Path, run_id: str, all_nodes: list[Node],
 ) -> None:
-    decomp = await _decompose(
-        prompt=node.prompt, bbox=node.bbox, parent_id=node.id,
-        all_nodes=all_nodes,
-    )
+    plan = await _plan_zone(node=node, all_nodes=all_nodes)
+    # Node is frozen; swap the planned copy into the shared registry so
+    # later decomp / sibling-decomp calls read the plan rather than the
+    # stale pre-plan version.
+    planned = node.model_copy(update={"plan": plan})
+    idx = all_nodes.index(node)
+    all_nodes[idx] = planned
+    node = planned
+    logging.log("divider.zone_plan", node=node.id, plan=plan)
+
+    decomp = await _decompose(node=node, all_nodes=all_nodes)
     logging.log(
         "divider.decompose",
         node=node.id,
@@ -196,7 +248,6 @@ async def _build(
             bbox=child_bbox,
             relationships=list(spec.relationships),
             parent_id=node.id,
-            plan=spec.plan,
         )
         placed.append(child)
         all_nodes.append(child)

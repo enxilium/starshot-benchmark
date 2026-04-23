@@ -44,13 +44,96 @@ def render_overall_bbox(user_prompt: str) -> str:
     )
 
 
+# ---------- Step 2.5: zone plan (runs before every decomposition) -----------
+
+
+class ZonePlanOutput(BaseModel):
+    plan: str
+
+
+SYSTEM_ZONE_PLAN = """\
+You are authoring the PLAN for a 3D scene ZONE, BEFORE it gets decomposed \
+into sub-zones. This plan is the zone's north-star: it will be fetched \
+verbatim at the very next decomposition step, so the downstream LLM stays \
+coherent with a single upfront vision rather than inventing one ad-hoc.
+
+At the ROOT level (the whole-scene zone), this plan sets the overall scene \
+direction — it is then fetched at every descendant decomposition step too.
+At NON-ROOT levels, this plan is specific to the zone being planned, but it \
+MUST stay consistent with the SCENE PLAN and with every prior zone's plan.
+
+You are given:
+  * The zone being planned: its id, prompt, and axis-aligned bounding box \
+    (in meters, under the canonical front view: +X right, +Y up, +Z front).
+  * For non-root zones only: the overall scene prompt, the SCENE PLAN (the \
+    root zone's plan), and the PRIOR SCENE CONTEXT — every zone already \
+    declared in the run, with their plans.
+
+Write one cohesive plan for the zone that:
+  * Captures the zone's intent, mood, and spatial character — what it *is* \
+    and *feels like*.
+  * Sketches the major sub-regions the zone should contain and how they \
+    sit relative to one another (e.g. "a walled grounds split into a \
+    formal front garden, a central residence, and a wilder rear orchard"). \
+    Speak in REGIONS, not individual objects.
+  * Stays ABSTRACT. Do NOT prescribe concrete coordinates, dimensions, \
+    counts, materials, brands, or specific objects. Do NOT dictate an \
+    exact sub-zone tree — the decomposition step still needs agency.
+  * Is concise: a short paragraph, at most ~6 sentences.
+
+Emit via the `emit` tool. No prose outside the tool call.\
+"""
+
+
+def render_zone_plan(
+    *,
+    zone_id: str,
+    zone_prompt: str,
+    zone_bbox: BoundingBox,
+    scene_prompt: str | None,
+    scene_plan: str | None,
+    prior_zones: list[tuple[str, str, str, str]],
+) -> str:
+    """For the root, pass scene_prompt=None, scene_plan=None, prior_zones=[].
+    For non-root zones, pass the scene prompt, the root's plan, and every
+    already-planned zone in the run (id, prompt, plan, parent_id)."""
+    zone_block = (
+        f"ZONE_ID (being planned): {zone_id!r}\n"
+        f"Zone prompt: {zone_prompt!r}\n"
+        f"Zone bbox: {zone_bbox.model_dump()}"
+    )
+    if scene_plan is None:
+        return (
+            f"{zone_block}\n\n"
+            "This is the ROOT zone — the whole scene. Produce the PLAN that "
+            "will guide every downstream zone decomposition."
+        )
+    if prior_zones:
+        lines = [
+            f"  - id={zid!r} parent={zparent!r}\n"
+            f"    prompt: {zprompt}\n"
+            f"    plan: {zplan}"
+            for zid, zprompt, zplan, zparent in prior_zones
+        ]
+        prior_block = "\n".join(lines)
+    else:
+        prior_block = "  (none)"
+    return (
+        f"Overall scene prompt: {scene_prompt!r}\n\n"
+        f"SCENE PLAN (the north-star for the whole scene):\n{scene_plan}\n\n"
+        f"Prior zones declared so far:\n{prior_block}\n\n"
+        f"{zone_block}\n\n"
+        "Produce the PLAN for this zone — the north-star for its upcoming "
+        "decomposition."
+    )
+
+
 # ---------- Step 3: children decomposition (zones) --------------------------
 
 
 class ChildNodeSpec(BaseModel):
     id: str
     prompt: str
-    plan: str
     relationships: list[Relationship] = Field(default_factory=list)
 
 
@@ -69,13 +152,20 @@ objects are NOT child nodes — they are materialized later by the generation \
 pipeline, which fills leaf zones with objects.
 
 You are given:
-  * The current zone being decomposed (its id, prompt, bbox).
-  * The PRIOR SCENE CONTEXT — the overall scene prompt plus every zone \
-    already declared anywhere in the scene (parents, grandparents, \
-    previously-placed uncles and their subtrees). Each prior zone lists \
-    its prompt and PLAN. Use this to stay coherent with the rest of the \
-    scene: don't contradict a sibling's plan, don't duplicate a concept \
-    another zone already owns, and respect the overall scene's direction.
+  * The current zone being decomposed (its id, prompt, bbox, and its own \
+    PLAN — written by the planning step immediately before this call). \
+    Your decomposition MUST execute the zone's plan: the children you emit \
+    should realise the regions it sketches.
+  * The SCENE PLAN — the root zone's plan, authored before any \
+    decomposition began. It is the north-star for every step. Your \
+    decomposition MUST stay consistent with it: do not contradict its \
+    intent, mood, or regional sketch.
+  * The PRIOR SCENE CONTEXT — every zone already declared anywhere in the \
+    scene (parents, grandparents, previously-placed uncles and their \
+    subtrees). Each prior zone lists its prompt and PLAN. Use this to stay \
+    coherent with the rest of the scene: don't contradict a sibling's \
+    plan, don't duplicate a concept another zone already owns, and respect \
+    the overall scene's direction.
 
 Produce either:
   (a) `is_atomic = true, children = []` — this zone is a LEAF: its next \
@@ -96,25 +186,11 @@ For each child zone, emit:
   * `id` — unique within the whole scene (do not collide with any id in \
     the prior scene context).
   * `prompt` — a short concrete description of the child zone (what it is).
-  * `plan` — a HIGH-LEVEL, ABSTRACT vision for this child zone. This is \
-    the ONLY way information flows forward: when the child is later \
-    decomposed or populated with objects, the downstream LLM will read \
-    this plan as context. It MUST:
-      - capture intent, mood, function, and spatial character — "what \
-        this zone is *for* and *feels like*".
-      - stay ABSTRACT. Do NOT prescribe specific objects, counts, \
-        dimensions, materials, colors, or brands. Do NOT dictate what \
-        sub-zones the child must contain. Downstream LLMs still need \
-        agency to make those decisions.
-      - be at most ~3 sentences.
-      Good: "A calm, utilitarian toilet area prioritising quick access \
-      and easy cleaning. The mood is clinical rather than spa-like."
-      Bad: "The toilet area contains a Toto porcelain toilet with a \
-      heated seat, a wall-mounted toilet paper holder, and a framed \
-      mirror above a pedestal sink." (too specific — removes downstream \
-      agency)
   * `relationships` — how the child is anchored inside this zone. Every \
     child MUST have at least one relationship.
+
+Do NOT author a plan for each child here — a dedicated planning step runs \
+for every child zone right before it is itself decomposed.
 
 A Relationship has:
   * `target` — either the parent id (provided below as PARENT_ID) or the \
@@ -138,34 +214,38 @@ def render_children_decomp(
     *,
     prompt: str,
     bbox: BoundingBox,
+    plan: str,
     parent_id: str,
     scene_prompt: str,
-    prior_zones: list[tuple[str, str, str | None, str | None]],
+    scene_plan: str,
+    prior_zones: list[tuple[str, str, str, str]],
 ) -> str:
-    """prior_zones: list of (id, prompt, plan, parent_id) for every zone
-    already declared in the run, in declaration order. Plan is None only
-    for the root."""
+    """prior_zones: list of (id, prompt, plan, parent_id) for every non-root
+    zone already declared in the run, in declaration order. The root is
+    communicated separately via scene_prompt + scene_plan. `plan` is the
+    zone's own plan, written by the planning step right before this call."""
     if prior_zones:
         lines = []
         for zid, zprompt, zplan, zparent in prior_zones:
-            plan_text = zplan if zplan is not None else "(root scene — no plan)"
             lines.append(
                 f"  - id={zid!r} parent={zparent!r}\n"
                 f"    prompt: {zprompt}\n"
-                f"    plan: {plan_text}"
+                f"    plan: {zplan}"
             )
         prior_block = "\n".join(lines)
     else:
         prior_block = "  (none)"
     return (
         f"Overall scene prompt: {scene_prompt!r}\n\n"
+        f"SCENE PLAN (the north-star for the whole scene):\n{scene_plan}\n\n"
         f"Prior zones declared so far:\n{prior_block}\n\n"
         f"PARENT_ID (the zone being decomposed): {parent_id!r}\n"
         f"Parent prompt: {prompt!r}\n"
-        f"Parent bbox: {bbox.model_dump()}\n\n"
+        f"Parent bbox: {bbox.model_dump()}\n"
+        f"Parent PLAN (this zone's own plan — execute it):\n{plan}\n\n"
         "Decompose this node. Either mark it atomic, or list its children, "
-        "each with an id, prompt, HIGH-LEVEL abstract plan, and "
-        "relationships to the parent / earlier siblings."
+        "each with an id, prompt, and relationships to the parent / earlier "
+        "siblings."
     )
 
 
@@ -283,10 +363,15 @@ For each object, emit:
     desk. A book on a shelf: the book's parent is the shelf. Parent does \
     NOT imply spatial containment — a lamp's bbox is NOT inside the \
     desk's bbox; it sits on top.
-  * `relationships` — how this object is anchored spatially. AT LEAST ONE \
-    relationship MUST have `target == parent` (this is the primary \
-    anchor). Additional relationships may target sibling objects (i.e. \
-    other objects listed in this call).
+  * `relationships` — how this object is anchored spatially. EVERY object \
+    is REQUIRED to include at least one relationship whose `target` is \
+    EXACTLY EQUAL to that same object's `parent` field. This is the \
+    primary anchor, it is NOT optional, and any object that lacks it is \
+    malformed and will be rejected by the validator. Encapsulating \
+    elements are no exception: a wall, floor, ceiling, moat, or fence \
+    whose `parent` is the zone id must list the zone id as the target of \
+    at least one of its relationships. Additional relationships may \
+    target sibling objects (i.e. other objects listed in this call).
 
 A Relationship has:
   * `target` — the parent (zone or another object in this list) or a \
@@ -311,8 +396,20 @@ def render_object_decomp(
     zone_prompt: str,
     zone_bbox: BoundingBox,
     scenario: Literal["anchor", "encapsulating"],
+    previous_error: str | None = None,
 ) -> str:
     mode = "ANCHOR" if scenario == "anchor" else "ENCAPSULATING"
+    retry_block = (
+        (
+            "\n\nPRIOR ATTEMPT FAILED VALIDATION:\n"
+            f"  {previous_error}\n\n"
+            "Fix the specific problem above. In particular, ensure every "
+            "object's `relationships` list contains at least one item whose "
+            "`target` is EXACTLY EQUAL to that same object's `parent` field."
+        )
+        if previous_error
+        else ""
+    )
     return (
         f"MODE: {mode}\n"
         f"ZONE_ID: {zone_id!r}\n"
@@ -321,6 +418,7 @@ def render_object_decomp(
         "List the objects for this zone in the mode above. Each object has "
         "an id, prompt, parent (zone id or another object in this list), "
         "and at least one relationship whose target is its parent."
+        f"{retry_block}"
     )
 
 
@@ -430,7 +528,10 @@ decomposition step:
   * `parent` — either this zone's id, or the id of ANY already-placed \
     node in the scene (typically an object already placed in THIS zone, \
     like a cup on a previously-placed desk).
-  * `relationships` — at least one MUST have `target == parent`. \
+  * `relationships` — REQUIRED to include at least one relationship whose \
+    `target` is EXACTLY EQUAL to this emitted object's `parent` field. \
+    This is the primary anchor, it is NOT optional, and any object that \
+    lacks it is malformed and will be rejected by the validator. \
     Additional relationships may target already-placed objects.
 
 Parent is semantic ("belongs to"), not a spatial containment constraint.
@@ -439,12 +540,69 @@ Emit via the `emit` tool. No prose outside the tool call.\
 """
 
 
+class ImagePromptOutput(BaseModel):
+    prompt: str
+
+
+SYSTEM_IMAGE_PROMPT = """\
+You are rewriting an object description into a text-to-image prompt for \
+Google's Nano Banana Pro. The resulting image feeds an image-to-3D model, \
+so the image must depict the object cleanly, completely, and in correct \
+proportions — it is a reference photo, not a scene.
+
+You are given:
+  * The original object prompt.
+  * The object's resolved axis-aligned bounding box, in meters (width +X, \
+    height +Y, depth +Z) under the canonical front view.
+
+Produce a single image-generation prompt that:
+  * Depicts ONE instance of the object, centered, filling most of the \
+    frame, fully visible with no cropping.
+  * Sits on a plain neutral studio background (clean white or very light \
+    grey seamless backdrop). No scenery, no context objects, no people, \
+    no text, no labels, no watermarks.
+  * Uses even, soft, diffuse lighting. No dramatic shadows, no coloured \
+    gels, no environmental reflections that imply a setting.
+  * Camera framing matches the object's true aspect:
+      - Genuinely flat pieces (walls, floors, ceilings, thin panels — one \
+        axis << the other two): show a near-orthographic head-on or \
+        slightly angled view that makes the piece read as a thin flat \
+        panel at the correct aspect ratio. Do NOT render them as boxes.
+      - Volumetric objects (chairs, tables, trees, lamps): use a \
+        three-quarter product-shot angle that reveals depth.
+      - Long extruded features (moats, fences, cliff faces): show the \
+        full length at a slight angle so both length and cross-section \
+        read correctly.
+  * Communicates the proportions verbally too — e.g. "a long narrow \
+    16m-wide by 3m-tall flat wall panel, extremely thin, viewed head-on". \
+    The image model uses this as a strong prior.
+  * Preserves every material, colour, and stylistic detail from the \
+    original prompt. Do NOT invent new features.
+  * Reads as a single concrete prompt, 1-3 sentences, phrased as \
+    photography / product-render direction rather than 3D modelling \
+    instructions.
+
+Emit via the `emit` tool. No prose outside the tool call.\
+"""
+
+
+def render_image_prompt(*, prompt: str, bbox: BoundingBox) -> str:
+    w, h, d = bbox.size
+    return (
+        f"Original object prompt: {prompt!r}\n"
+        f"Bounding box dimensions: width={w:.2f}m, height={h:.2f}m, depth={d:.2f}m\n\n"
+        "Rewrite as a Nano Banana Pro image prompt that produces a clean "
+        "reference image of this object for an image-to-3D pipeline."
+    )
+
+
 def render_next_object(
     *,
     zone_id: str,
     zone_prompt: str,
     zone_bbox: BoundingBox,
     scene: list[tuple[str, str, BoundingBox, str | None]],
+    previous_error: str | None = None,
 ) -> str:
     scene_lines = (
         "\n".join(
@@ -454,6 +612,17 @@ def render_next_object(
         if scene
         else "  (none)"
     )
+    retry_block = (
+        (
+            "\n\nPRIOR ATTEMPT FAILED VALIDATION:\n"
+            f"  {previous_error}\n\n"
+            "Fix the specific problem above. If you emit an object, its "
+            "`relationships` list MUST contain at least one item whose "
+            "`target` is EXACTLY EQUAL to that object's `parent` field."
+        )
+        if previous_error
+        else ""
+    )
     return (
         f"ZONE_ID: {zone_id!r}\n"
         f"Zone prompt: {zone_prompt!r}\n"
@@ -461,4 +630,5 @@ def render_next_object(
         f"Current scene (every node placed so far across the run):\n{scene_lines}\n\n"
         "Decide whether another object is needed in this zone. "
         "If yes, emit exactly one ObjectSpec; otherwise set done=true."
+        f"{retry_block}"
     )

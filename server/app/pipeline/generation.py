@@ -16,7 +16,6 @@ parallel Hunyuan + rescaling. Events stream via SSE as each mesh lands.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Literal
 
@@ -27,9 +26,12 @@ from app.core.prompts import (
     NextObjectOutput,
     ObjectDecompOutput,
     ObjectSpec,
+    ImagePromptOutput,
+    SYSTEM_IMAGE_PROMPT,
     SYSTEM_NEXT_OBJECT,
     SYSTEM_OBJECT_BBOX_RESOLVE,
     SYSTEM_OBJECT_DECOMP,
+    render_image_prompt,
     render_next_object,
     render_object_bbox_resolve,
     render_object_decomp,
@@ -55,7 +57,10 @@ def _bboxes_overlap(a: BoundingBox, b: BoundingBox, tol: float = 0.01) -> bool:
 
 
 async def _decompose_objects(
-    *, zone: Node, scenario: Literal["anchor", "encapsulating"],
+    *,
+    zone: Node,
+    scenario: Literal["anchor", "encapsulating"],
+    previous_error: str | None = None,
 ) -> list[ObjectSpec]:
     out = await llm.call_llm(
         system=SYSTEM_OBJECT_DECOMP,
@@ -64,13 +69,19 @@ async def _decompose_objects(
             zone_prompt=zone.prompt,
             zone_bbox=zone.bbox,
             scenario=scenario,
+            previous_error=previous_error,
         ),
         output_schema=ObjectDecompOutput,
     )
     return list(out.objects)
 
 
-async def _next_object(*, zone: Node, all_nodes: list[Node]) -> NextObjectOutput:
+async def _next_object(
+    *,
+    zone: Node,
+    all_nodes: list[Node],
+    previous_error: str | None = None,
+) -> NextObjectOutput:
     scene = [(n.id, n.prompt, n.bbox, n.parent_id) for n in all_nodes]
     return await llm.call_llm(
         system=SYSTEM_NEXT_OBJECT,
@@ -79,9 +90,68 @@ async def _next_object(*, zone: Node, all_nodes: list[Node]) -> NextObjectOutput
             zone_prompt=zone.prompt,
             zone_bbox=zone.bbox,
             scene=scene,
+            previous_error=previous_error,
         ),
         output_schema=NextObjectOutput,
     )
+
+
+DECOMP_RETRY_ATTEMPTS = 3
+
+
+async def _decompose_objects_validated(
+    *,
+    zone: Node,
+    scenario: Literal["anchor", "encapsulating"],
+    all_nodes: list[Node],
+) -> list[ObjectSpec]:
+    last_error: str | None = None
+    for attempt in range(DECOMP_RETRY_ATTEMPTS):
+        specs = await _decompose_objects(
+            zone=zone, scenario=scenario, previous_error=last_error,
+        )
+        try:
+            validate_object_relationships(
+                specs, zone_id=zone.id,
+                existing_ids={n.id for n in all_nodes},
+            )
+            return specs
+        except ValueError as e:
+            last_error = str(e)
+            logging.log(
+                "generation.decompose.retry",
+                zone=zone.id, attempt=attempt, reason=last_error,
+            )
+            if attempt == DECOMP_RETRY_ATTEMPTS - 1:
+                raise
+    raise AssertionError("unreachable")
+
+
+async def _next_object_validated(
+    *, zone: Node, all_nodes: list[Node],
+) -> NextObjectOutput:
+    last_error: str | None = None
+    for attempt in range(DECOMP_RETRY_ATTEMPTS):
+        decision = await _next_object(
+            zone=zone, all_nodes=all_nodes, previous_error=last_error,
+        )
+        if decision.done or decision.object is None:
+            return decision
+        try:
+            validate_object_relationships(
+                [decision.object], zone_id=zone.id,
+                existing_ids={n.id for n in all_nodes},
+            )
+            return decision
+        except ValueError as e:
+            last_error = str(e)
+            logging.log(
+                "generation.next.retry",
+                zone=zone.id, attempt=attempt, reason=last_error,
+            )
+            if attempt == DECOMP_RETRY_ATTEMPTS - 1:
+                raise
+    raise AssertionError("unreachable")
 
 
 def _lookup_parent(
@@ -146,15 +216,6 @@ async def _resolve_and_generate(
     runs_dir: Path,
     run_id: str,
 ) -> list[Node]:
-    try:
-        validate_object_relationships(
-            specs, zone_id=zone.id,
-            existing_ids={n.id for n in all_nodes},
-        )
-    except ValueError as e:
-        logging.log("generation.validate.relationships.fail", reason=str(e))
-        raise
-
     ordered = toposort_children(specs)
 
     resolved: list[Node] = []
@@ -189,36 +250,64 @@ async def _resolve_and_generate(
                     raise
         assert bbox is not None
         logging.emit_bbox(spec.id, bbox)
+        image_prompt = await _build_image_prompt(
+            prompt=spec.prompt, bbox=bbox,
+        )
         resolved.append(Node(
             id=spec.id,
-            prompt=spec.prompt,
+            prompt=image_prompt,
             bbox=bbox,
             relationships=list(spec.relationships),
             parent_id=spec.parent,
         ))
 
-    return await _generate_parallel(resolved=resolved, runs_dir=runs_dir, run_id=run_id)
+    return await _generate_sequential(
+        resolved=resolved, runs_dir=runs_dir, run_id=run_id, scenario=scenario,
+    )
 
 
-async def _generate_parallel(
-    *, resolved: list[Node], runs_dir: Path, run_id: str,
+async def _build_image_prompt(*, prompt: str, bbox: BoundingBox) -> str:
+    out = await llm.call_llm(
+        system=SYSTEM_IMAGE_PROMPT,
+        user=render_image_prompt(prompt=prompt, bbox=bbox),
+        output_schema=ImagePromptOutput,
+    )
+    return out.prompt
+
+
+async def _generate_sequential(
+    *,
+    resolved: list[Node],
+    runs_dir: Path,
+    run_id: str,
+    scenario: Literal["anchor", "encapsulating"],
 ) -> list[Node]:
     objs_dir = runs_dir / run_id / "objects"
     objs_dir.mkdir(parents=True, exist_ok=True)
+    rescale_mode = "fill" if scenario == "encapsulating" else "fit"
 
-    async def _one(node: Node) -> Node:
+    out: list[Node] = []
+    for node in resolved:
         raw = objs_dir / f"{node.id}.raw.glb"
         path = objs_dir / f"{node.id}.glb"
+        image_stem = objs_dir / node.id
         logging.log("hunyuan.submit", id=node.id, prompt=node.prompt)
-        await threed.generate_mesh(node.prompt, output_path=raw)
+        paths = await threed.generate_mesh(
+            node.prompt, output_path=raw, image_stem=image_stem,
+        )
+        logging.log(
+            "image",
+            id=node.id,
+            url=_artifact_url(runs_dir, paths["image"]),
+            prompt=node.prompt,
+        )
         scene = trimesh.load(raw)
-        rescaled = rescale_mesh_to_bbox(scene, node.bbox)
+        rescaled = rescale_mesh_to_bbox(scene, node.bbox, mode=rescale_mode)
         rescaled.export(path, file_type="glb")
         url = _artifact_url(runs_dir, path)
         logging.emit_model(node.id, artifact_kind="object", url=url)
-        return node.model_copy(update={"mesh_url": url})
-
-    return await asyncio.gather(*[_one(n) for n in resolved])
+        out.append(node.model_copy(update={"mesh_url": url}))
+    return out
 
 
 async def run(
@@ -229,7 +318,9 @@ async def run(
     scenario: Literal["anchor", "encapsulating"],
     all_nodes: list[Node],
 ) -> None:
-    specs = await _decompose_objects(zone=zone, scenario=scenario)
+    specs = await _decompose_objects_validated(
+        zone=zone, scenario=scenario, all_nodes=all_nodes,
+    )
     logging.log(
         "generation.decompose",
         zone=zone.id,
@@ -247,7 +338,7 @@ async def run(
         return
 
     while True:
-        decision = await _next_object(zone=zone, all_nodes=all_nodes)
+        decision = await _next_object_validated(zone=zone, all_nodes=all_nodes)
         if decision.done or decision.object is None:
             logging.log("generation.next.done", zone=zone.id)
             return

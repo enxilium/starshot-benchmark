@@ -48,6 +48,52 @@
       #log .step { color: #8bd17c; font-weight: 600; }
       #log .kv { margin-left: 2px; }
       #log .kv .k { color: #8a8f99; }
+      #assets {
+        position: fixed; top: 12px; right: 12px; width: 320px;
+        max-height: calc(100vh - 40vh); display: flex; flex-direction: column;
+        border-radius: 6px; background: rgba(22, 24, 29, 0.82);
+        backdrop-filter: blur(6px); font-size: 11px; line-height: 1.4;
+        z-index: 5;
+      }
+      #assets.collapsed #assets-body { display: none; }
+      #assets-header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 6px 10px; border-bottom: 1px solid #2a2d35;
+        font-size: 11px; color: #9ad4ff; cursor: pointer; user-select: none;
+      }
+      #assets.collapsed #assets-header { border-bottom: none; }
+      #assets-count { color: #8a8f99; font-weight: normal; }
+      #assets-body { overflow-y: auto; padding: 6px; display: flex;
+        flex-direction: column; gap: 6px; }
+      .asset-card {
+        display: flex; gap: 8px; padding: 6px; border-radius: 4px;
+        background: #16181d; border: 1px solid #2a2d35;
+      }
+      .asset-card.status-loaded { border-color: #3a5a3a; }
+      .asset-card.status-error { border-color: #5a3a3a; }
+      .asset-thumb {
+        width: 80px; height: 80px; flex-shrink: 0; border-radius: 3px;
+        background: #0c0d10; object-fit: cover; cursor: pointer;
+      }
+      .asset-thumb.placeholder {
+        display: flex; align-items: center; justify-content: center;
+        color: #5a5e68; font-size: 10px;
+      }
+      .asset-body { flex: 1; min-width: 0; display: flex; flex-direction: column;
+        gap: 3px; }
+      .asset-id { color: #e0c271; font-weight: 600; word-break: break-all; }
+      .asset-status {
+        font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+      }
+      .asset-status.pending { color: #8a8f99; }
+      .asset-status.loaded { color: #8bd17c; }
+      .asset-status.error { color: #ff8080; }
+      .asset-prompt {
+        color: #b8bcc4; white-space: pre-wrap;
+        display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+        overflow: hidden; cursor: pointer;
+      }
+      .asset-prompt.expanded { -webkit-line-clamp: unset; }
     </style>
     <script type="importmap">
       {
@@ -69,6 +115,13 @@
       <button id="prompt-submit" type="submit">Run</button>
     </form>
     <div id="status"><p class="line hdr">ready</p></div>
+    <div id="assets">
+      <div id="assets-header">
+        <span>assets <span id="assets-count">(0)</span></span>
+        <span id="assets-toggle">▾</span>
+      </div>
+      <div id="assets-body"></div>
+    </div>
     <div id="log"></div>
     <script type="module" src="/viewer.js"></script>
   </body>
