@@ -15,10 +15,13 @@ import os
 from typing import Literal
 
 import fal_client
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+
+load_dotenv()
 
 NANO_BANANA_MODEL = os.environ.get("NANO_BANANA_MODEL", "fal-ai/nano-banana-pro")
 TRELLIS_MODEL = os.environ.get("TRELLIS_MODEL", "fal-ai/trellis-2")
@@ -178,6 +181,7 @@ _PAGE = """<!doctype html>
     </fieldset>
 
     <button id="btn-trellis" type="button" disabled>2. Generate 3D (Trellis 2)</button>
+    <button id="btn-cancel" type="button" disabled style="background:#3a2a2a;border-color:#6a3a3a;">cancel</button>
 
     <div id="status"></div>
     <div id="image-url"></div>
@@ -212,6 +216,7 @@ const imagePane = $("image-pane");
 const modelPane = $("model-pane");
 const btnBanana = $("btn-banana");
 const btnTrellis = $("btn-trellis");
+const btnCancel = $("btn-cancel");
 const optRemesh = $("opt-remesh");
 const optResolution = $("opt-resolution");
 const optTexture = $("opt-texture");
@@ -223,6 +228,7 @@ const HISTORY_KEY = "playground.history";
 const PROMPT_KEY = "playground.prompt";
 
 let currentImageUrl = null;
+let activeController = null;
 const history = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]");
 promptEl.value = localStorage.getItem(PROMPT_KEY) ?? "";
 promptEl.addEventListener("input", () => localStorage.setItem(PROMPT_KEY, promptEl.value));
@@ -269,11 +275,32 @@ function showImage(url) {
   imageUrlEl.innerHTML = `<a class="image-url-link" href="${url}" target="_blank" rel="noopener">${url}</a>`;
 }
 
+function startBusy() {
+  activeController = new AbortController();
+  btnBanana.disabled = true;
+  btnTrellis.disabled = true;
+  btnCancel.disabled = false;
+}
+
+function endBusy() {
+  activeController = null;
+  btnBanana.disabled = false;
+  btnTrellis.disabled = !currentImageUrl;
+  btnCancel.disabled = true;
+}
+
+btnCancel.addEventListener("click", () => {
+  if (activeController) {
+    activeController.abort();
+    setStatus("cancelled", "err");
+  }
+});
+
 btnBanana.addEventListener("click", async () => {
   const prompt = promptEl.value.trim();
   if (!prompt) { setStatus("prompt is empty", "err"); return; }
-  btnBanana.disabled = true;
-  btnTrellis.disabled = true;
+  startBusy();
+  const signal = activeController.signal;
   setStatus("generating image…");
   const t0 = performance.now();
   try {
@@ -281,6 +308,7 @@ btnBanana.addEventListener("click", async () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt }),
+      signal,
     });
     if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
     const { image_url } = await r.json();
@@ -288,11 +316,15 @@ btnBanana.addEventListener("click", async () => {
     const dt = ((performance.now() - t0) / 1000).toFixed(1);
     setStatus(`image ready (${dt}s)` + (optAuto.checked ? " — forwarding to Trellis…" : ""), "ok");
     pushHistory({ prompt, imageUrl: image_url, glbUrl: null, ts: Date.now() });
-    if (optAuto.checked) await runTrellis();
+    if (optAuto.checked) {
+      endBusy();
+      await runTrellis();
+      return;
+    }
   } catch (e) {
-    setStatus(String(e.message ?? e), "err");
+    if (e.name !== "AbortError") setStatus(String(e.message ?? e), "err");
   } finally {
-    btnBanana.disabled = false;
+    if (activeController?.signal === signal) endBusy();
   }
 });
 
@@ -300,8 +332,8 @@ btnTrellis.addEventListener("click", () => runTrellis());
 
 async function runTrellis() {
   if (!currentImageUrl) { setStatus("no image yet", "err"); return; }
-  btnTrellis.disabled = true;
-  btnBanana.disabled = true;
+  startBusy();
+  const signal = activeController.signal;
   setStatus("generating 3D mesh…");
   const t0 = performance.now();
   try {
@@ -314,6 +346,7 @@ async function runTrellis() {
         resolution: Number(optResolution.value),
         texture_size: Number(optTexture.value),
       }),
+      signal,
     });
     if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
     const { glb_url } = await r.json();
@@ -325,10 +358,9 @@ async function runTrellis() {
       localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
     }
   } catch (e) {
-    setStatus(String(e.message ?? e), "err");
+    if (e.name !== "AbortError") setStatus(String(e.message ?? e), "err");
   } finally {
-    btnTrellis.disabled = false;
-    btnBanana.disabled = false;
+    if (activeController?.signal === signal) endBusy();
   }
 }
 

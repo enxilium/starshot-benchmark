@@ -677,6 +677,11 @@ class ObjectSpec(ChildNodeSpec):
     """A single object in a zone. Inherits id/prompt/relationships."""
 
     parent: str
+    # Yaw, radians, world-frame rotation about +Y. 0 = front faces world +Z
+    # (toward viewer); π/2 = front faces world -X (rotated right-hand). The
+    # mesh comes back from Trellis with its intrinsic front along +Z; this
+    # field rotates it into the world pose the LLM intends.
+    orientation: float = 0.0
 
 
 class ObjectDecompOutput(BaseModel):
@@ -812,6 +817,22 @@ For each object, emit:
     resting on the actual dome. Omit for architectural shells (walls, \
     floors, ceilings, fences) and any object whose bbox is already a \
     good silhouette.
+  * `orientation` — REQUIRED FLOAT (radians, default 0.0). World-frame \
+    yaw about +Y for the generated mesh. The image-to-3D model receives \
+    an ORTHOGRAPHIC FRONT VIEW of the object, so its mesh comes back \
+    with the visible front face along world +Z. `orientation` is the \
+    additional rotation needed to point the object's "front" the right \
+    way in the world. Right-handed about +Y: `0.0` keeps the front \
+    facing +Z (the viewer); `π/2` (≈1.5708) rotates the front to face \
+    -X; `π` (≈3.1416) faces -Z (away); `-π/2` (≈-1.5708) faces +X. \
+    Examples: a sofa whose seat opens toward the room centre needs \
+    orientation set so its front (the seat side) faces the room's \
+    interior, not the wall. A door in a wall on the +X face of a room \
+    needs orientation ≈ -π/2 so the door faces +X. The bbox stays an \
+    AABB regardless — orientation only rotates the mesh inside it, so \
+    a long object's bbox dimensions must match its long axis AFTER \
+    rotation. Omit (or set 0.0) for symmetric objects with no preferred \
+    facing (boulders, balls, columns, generic terrain).
   * `relationships` — how this object is anchored spatially. EVERY object \
     is REQUIRED to include at least one relationship whose `target` is \
     EXACTLY EQUAL to that same object's `parent` field. This is the \
@@ -850,7 +871,7 @@ def render_object_decomp(
     zone_prompt: str,
     zone_bbox: BoundingBox,
     scenario: Literal["anchor", "encapsulating", "negative-space"],
-    scene: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None]],
+    scene: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, float]],
     prior_attempts: list[tuple[list[ObjectSpec], str]] | None = None,
 ) -> str:
     mode = {
@@ -861,8 +882,9 @@ def render_object_decomp(
     scene_lines = (
         "\n".join(
             f"  - {nid}: prompt={prompt!r} bbox={bbox.model_dump_json()} "
-            f"proxy_shape={_render_proxy_shape(proxy)} parent={pid!r}"
-            for nid, prompt, bbox, pid, proxy in scene
+            f"proxy_shape={_render_proxy_shape(proxy)} "
+            f"orientation={orient:.3f}rad parent={pid!r}"
+            for nid, prompt, bbox, pid, proxy, orient in scene
         )
         if scene
         else "  (none)"
@@ -990,13 +1012,14 @@ def render_object_bbox_batch(
     zone_prompt: str,
     zone_bbox: BoundingBox,
     objects: list[ObjectSpec],
-    peers: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None]],
+    peers: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, float]],
 ) -> str:
     peer_lines = (
         "\n".join(
             f"  - {pid}: prompt={pprompt!r} bbox={pbbox.model_dump_json()} "
-            f"proxy_shape={_render_proxy_shape(pproxy)} parent={pparent!r}"
-            for pid, pprompt, pbbox, pparent, pproxy in peers
+            f"proxy_shape={_render_proxy_shape(pproxy)} "
+            f"orientation={porient:.3f}rad parent={pparent!r}"
+            for pid, pprompt, pbbox, pparent, pproxy, porient in peers
         )
         if peers
         else "  (none)"
@@ -1006,6 +1029,7 @@ def render_object_bbox_batch(
         f"    prompt: {o.prompt}\n"
         f"    parent: {o.parent!r}\n"
         f"    proxy_shape: {_render_proxy_shape(o.proxy_shape)}\n"
+        f"    orientation: {o.orientation:.3f}rad\n"
         f"    relationships:\n"
         + (
             "\n".join(
@@ -1064,6 +1088,14 @@ legibility or character. Same rules as the bulk decomposition step:
   * `parent` — either this zone's id, or the id of ANY already-placed \
     node in the scene (typically an object already placed in THIS \
     zone, like a cup on a previously-placed desk).
+  * `orientation` — REQUIRED FLOAT (radians, default 0.0). World-frame \
+    yaw about +Y. The mesh comes back from the image-to-3D model with \
+    its visible front along world +Z; orientation rotates it into the \
+    pose you intend. `0.0` = front faces +Z (toward viewer), `π/2` = \
+    front faces -X, `π` = front faces -Z (away), `-π/2` = front faces \
+    +X. Pick a non-zero value when the object has a clear "front" that \
+    should face a specific direction in the scene; leave 0.0 for \
+    symmetric objects.
   * `relationships` — REQUIRED to include at least one relationship \
     whose `target` is EXACTLY EQUAL to this emitted object's `parent` \
     field. This is the primary anchor, it is NOT optional, and any \
@@ -1103,245 +1135,84 @@ class ImagePromptOutput(BaseModel):
 
 
 SYSTEM_IMAGE_PROMPT = """\
-You are authoring the TEXT-TO-IMAGE prompt for a single object in a 3D \
-scene being built for StarshotBench — a head-to-head competitive \
-benchmark where your scene is rendered and judged against another \
-LLM's rendering of the same user prompt.
+You produce ONE short noun phrase naming the object to render. The \
+phrase is dropped verbatim into a fixed image-prompt template that \
+already handles framing, isolation, backdrop, and hitbox shape — your \
+output is the SUBJECT of the sentence and nothing more.
 
-Your rewrite drives Google's Nano Banana Pro, which produces a \
-reference image that is then fed to an image-to-3D model to generate \
-this object's mesh. The judges see the assembled scene; they don't \
-see your prompt. So your prompt's three jobs are:
-  1. Nail the object's intrinsic identity (shape, material, wear, \
-     character) so the generated mesh actually reads as the subject.
-  2. Cohere aesthetically with prior objects in this scene so the \
-     whole assembly feels like one authored world rather than a \
-     mismatched collage of stock assets.
-  3. Isolate the object completely from its scene context so the \
-     mesh doesn't come back with baked-in junk geometry.
+The user message will show you the EXACT wrapper your phrase is \
+slotted into, with a `<<<SUBJECT>>>` marker where your output goes. \
+Read it before writing. Anything the wrapper already says — \
+"orthographic front view", the hitbox shape, the white background, \
+"capture the entire model" — must NOT appear in your phrase, or it \
+will read twice.
 
-A careful rewrite makes this object slot into the scene as if it \
-belonged there all along. A lazy rewrite produces a generic asset \
-that clashes with its neighbours and pulls down the final render's \
-score. Every object in the scene passes through this step; the \
-cumulative aesthetic quality of your rewrites IS the scene's visual \
-quality.
-
-The resulting image must be a CLEAN ISOLATED REFERENCE PHOTO of the \
-object — like a studio product shot or a museum-catalogue plate — \
-NOT a realistic depiction of the object in its natural environment. \
-Any background scenery, ground, water, foliage, or context the \
-image-to-3D model sees will be baked into the generated mesh as junk \
-geometry.
-
-<inputs>
+Inputs you receive:
   * The original object prompt.
-  * The object's resolved axis-aligned bounding box, in meters (width +X, \
-    height +Y, depth +Z) under the canonical front view.
-  * The object's proxy_shape (BOX, SPHERE, CAPSULE, or HEMISPHERE) — the \
-    silhouette the downstream collision and surface-anchoring math will \
-    assume for this object. The generated mesh's silhouette must match \
-    this proxy or peers anchored ON it will float / clip.
-  * The chronological list of prior Nano Banana prompts already emitted \
-    in this scene (possibly empty for the first object) — every prompt \
-    sent to the image model so far, across encapsulating shells, anchor \
-    objects, and completion-loop additions alike.
-</inputs>
+  * The bounding box dimensions in meters (width +X, height +Y, \
+    depth +Z) — use them to pick proportion-sensitive adjectives \
+    ("long", "tall", "squat") only when natural.
+  * The proxy_shape — already encoded into the wrapper's hitbox \
+    language; don't repeat it in your phrase.
+  * The full image-prompt template with the `<<<SUBJECT>>>` slot \
+    visible.
+  * The chronological list of prior subject phrases already submitted \
+    in this scene — borrow material vocabulary, palette, and stylistic \
+    register so the asset coheres with what came before. Do not copy \
+    verbatim.
 
-<proxy_shape_contract>
-The proxy_shape is a hard contract between the rendered silhouette and \
-the rest of the scene. Phrase the image prompt so the generated mesh's \
-outline against the studio backdrop reads as that shape:
+Rules for the phrase:
+  * 5-15 words, lower-case, no trailing period.
+  * Names the object directly with its defining attributes (species, \
+    material, colour, weathering, character). E.g. "a weathered \
+    cypress log with bleached bark and patches of moss", "a sleek \
+    matte-black office chair with chromed swivel base", "a low \
+    domed mossy island with thin muddy lip".
+  * NO scene context: drop "half-submerged in", "surrounded by", \
+    "resting in", "on the floor of", "nestled among". Keep only \
+    intrinsic features of the object itself.
+  * NO camera, framing, backdrop, lighting, or rendering instructions \
+    — the wrapper handles all of that.
+  * NO mention of orthographic, hitbox, prism, rectangle, or any \
+    shape language — the wrapper handles silhouette too.
 
-  * BOX (the default — null / omitted) — rectilinear silhouette. Most \
-    objects: furniture, crates, walls, signs, chests.
-  * SPHERE — ellipsoidal silhouette inscribed in the bbox. Boulders, \
-    planets, fruit, balls, orbs. Phrase as "a roughly spherical / \
-    ellipsoidal X" and forbid any rectilinear framing.
-  * CAPSULE — vertical column with rounded top and bottom caps along \
-    Y. Tree trunks, pillars, lampposts, bottles, humans. Phrase as "a \
-    columnar X with rounded ends, narrower than it is tall".
-  * HEMISPHERE — upper half of an ellipsoid resting on its equatorial \
-    disk at the bbox bottom face, apex at the top. Domed mounds, \
-    half-buried boulders, low islands, cathedral domes. Phrase as "a \
-    domed X rising from a flat circular base, apex at the centre top, \
-    tapering to nothing at the rim".
-
-If the proxy_shape is BOX (or null), say nothing about silhouette — the \
-default rectilinear read is correct.
-</proxy_shape_contract>
-
-<stylistic_anchoring>
-Treat the prior prompts as a STYLISTIC ANCHOR so this object reads as \
-part of the same world: share material vocabulary, palette, lighting, \
-and rendering language with what came before, weighting prior prompts \
-for semantically similar objects most heavily (a wall coheres most \
-strongly with earlier walls, then with other architectural surfaces, \
-then with props in the same zone). Do NOT copy a prior prompt verbatim. \
-On object identity the current original prompt wins; on shared \
-aesthetic choices the prior prompts win.
-</stylistic_anchoring>
-
-<rules>
-Produce a single image-generation prompt that:
-  * Depicts ONE instance of the object, centered, filling most of the \
-    frame, fully visible with no cropping.
-  * Is a complete aesthetic REWRITE of the original prompt, not an \
-    additive wrapper. Do NOT preserve phrases like "half-submerged in", \
-    "surrounded by", "resting in", "nestled among", or any spatial \
-    relation to the object's environment — those describe scene \
-    context, not the object itself. Keep only intrinsic features of \
-    the object: species, material, colour, texture, weathering, moss \
-    or lichen ON its surface, age, damage, shape. Drop every reference \
-    to the swamp, forest, water, ground, room, sky, or neighbours the \
-    object happens to live near.
-  * ISOLATES the object completely. Plain neutral studio backdrop — \
-    clean white or very light grey seamless cyc. Explicitly forbid \
-    ANY environmental elements: no ground plane, no water, no \
-    reflections, no sky, no horizon, no foliage behind or beside the \
-    object, no other props, no people, no text, no labels, no \
-    watermarks. The object floats on or rests on nothing but the \
-    empty studio backdrop.
-  * Uses even, soft, diffuse studio lighting. No dramatic shadows, no \
-    coloured gels, no environmental reflections that imply a setting, \
-    no atmospheric haze or fog.
-  * Camera framing is a NATURAL PHOTOGRAPH of the real object, taken \
-    from a standard three-quarter angle (slightly above and slightly \
-    to one side of the front) with gentle perspective — the kind of \
-    shot a product photographer would take of the real thing on a \
-    studio cyc. All three dimensions must be visible: the front face, \
-    one side face, and the top face should all appear. The object \
-    must look REAL and RECOGNISABLE at this angle — not a schematic, \
-    not an exploded isometric, not a floating decorative display, not \
-    an orthographic top-down composition. Do NOT use head-on \
-    elevation, pure orthographic, or near-parallel views — they let \
-    the image-to-3D model invent depth behind the visible face. Do \
-    NOT use extreme top-down or bird's-eye angles — they flatten and \
-    distort the object and produce the same failure.
-  * MATCHES THE BBOX ASPECT RATIO. The object's silhouette in the \
-    image should read at roughly the bbox's width-by-height-by-depth \
-    proportions: a long low log reads long and low; a tall narrow \
-    tree reads tall and narrow; a cube-like chest reads roughly \
-    cubic. Communicates the proportions verbally too, naming all \
-    three dimensions in meters — e.g. "a weathered fallen cypress \
-    log, roughly 3.2m long by 0.8m tall by 0.6m deep, photographed \
-    from a natural three-quarter angle on a plain light-grey studio \
-    backdrop". The image model uses this as a strong prior.
-  * Preserves every INTRINSIC material, colour, and stylistic detail \
-    from the original prompt (weathering, moss on the bark, bleached \
-    wood, rot, species). Do NOT invent new features. Do NOT add \
-    environmental flora, water, debris, mist, or anything that isn't \
-    part of the object itself.
-  * Reads as a single concrete prompt, 1-3 sentences, phrased as \
-    product-photography direction rather than scene description or \
-    3D modelling instructions.
-
-Respond with ONE JSON object matching the schema. No prose, no markdown, no code fences.\
+Respond with ONE JSON object matching the schema. The `prompt` field \
+holds the noun phrase only.\
 """
 
 
-ENCAPSULATING_IMAGE_SUFFIX = """\
+_SUBJECT_SLOT = "<<<SUBJECT>>>"
 
-This object is ENCAPSULATING GEOMETRY — the physical shell or ground of \
-a zone. Downstream it is rescaled per-axis to EXACTLY fill its bounding \
-box, so the mesh's extreme points along each axis will be pushed to the \
-AABB corners. Picking a shape that already fills the AABB naturally \
-avoids distortion.
 
-Before writing the image prompt, classify the object from the original \
-prompt as either ARCHITECTURAL SHELL or TERRAIN SHELL:
+# (3D hitbox term, 2D silhouette term) — slotted into the image-prompt
+# wrapper so the prompt's geometric guidance matches the proxy the rest
+# of the pipeline uses.
+_HITBOX_TERMS: dict[ProxyShape | None, tuple[str, str]] = {
+    None: ("rectangular prism", "rectangle"),
+    ProxyShape.SPHERE: ("ellipsoid", "ellipse"),
+    ProxyShape.CAPSULE: ("vertical capsule", "pill"),
+    ProxyShape.HEMISPHERE: ("dome", "dome"),
+}
 
-  (A) ARCHITECTURAL SHELL — a wall, floor, ceiling, roof, fence, \
-      panel, slab, paved surface, or other flat/rectangular construction \
-      meant to enclose or bound a zone.
-  (B) TERRAIN SHELL — an island, hill, mound, dune, crater, bowl, \
-      ridge, outcrop, cliff face, knoll, bank, or any natural landform \
-      whose defining character IS its irregular, organic shape.
 
-All encapsulating objects, regardless of case, must be a SOLID \
-CONTINUOUS MASS of real material. Every imagined cross-section is \
-FILLED — no hollow shells, no cavities, no internal voids, no parallel \
-front-and-back panels separated by a gap, no cutaway views, no \
-exploded construction layers. Openings (windows, crater mouths) are \
-part of the outer face, not portals into an interior. The image-to-3D \
-model treats every dark cavity or visible back-face as a cue to \
-hallucinate geometry, so the image must give it nothing to work with.
+def _article(word: str) -> str:
+    return "an" if word[:1].lower() in "aeiou" else "a"
 
-The backdrop stays a plain neutral studio cyc with NO environmental \
-context: no water, no ground plane under the object, no foliage, no \
-horizon, no mist, no sky. The shell sits on the empty backdrop as if \
-on a museum plinth — a literal slice of the real geometry, \
-photographed in isolation. Any environment the image model sees gets \
-baked into the mesh as junk.
 
-ARCHITECTURAL RULES (case A only):
-
-  * Depict the object as a CLEAN RECTANGULAR BODY with absolutely \
-    nothing poking outside its rectangular silhouette:
-      - No base moldings, plinths, skirting, baseboards, foundation \
-        trim, kickplates, or any feature extending below or outside \
-        the main face.
-      - No roof overhangs, eaves, cornices, crown moldings, parapets, \
-        or capstones extending above or outside the top edge.
-      - No buttresses, pilasters, flanges, lips, rims, stepped \
-        setbacks, or recessed panels that break the flat rectangular \
-        outline.
-      - No separate foundation block, ground ledge, or plinth beneath \
-        the main body.
-
-  * For flat pieces, the panel's SILHOUETTE must be a single continuous \
-    rectangular slab at the given aspect ratio — an unbroken rectangle \
-    with four crisp straight edges. Explicitly forbid cut-outs, \
-    notches, L- or T- or plus-shapes, gaps, splits, detached pieces, \
-    or multi-tile arrangements. Phrase this as a hard visual \
-    constraint (e.g. "a single solid rectangular slab, 16m by 5m by \
-    0.2m, unbroken rectangular outline, no cut-outs, no separated \
-    pieces").
-
-  * If the original prompt describes multiple materials, zones, or \
-    regions on a flat piece ("pavers with gravel strips and \
-    groundcover between them," "wood planks with tile inlay," "a \
-    driveway apron and a pedestrian path"), render them as FLAT \
-    COPLANAR SURFACE TEXTURE on the single rectangle — printed, \
-    painted, or inlaid flush with the rest of the top face — NEVER \
-    as raised, recessed, or cut-out geometry, and never as separate \
-    physical tiles with space between them. Spatial connective words \
-    from the original prompt ("running through," "integrating," \
-    "between," "along," "section of") describe texture layout on a \
-    single continuous surface, NOT an arrangement of independent \
-    pieces.
-
-  * If the original prompt names the piece's functional role (front \
-    porch, garden path, hallway floor, accent wall, driveway apron), \
-    include that role verbatim so the image model recognises what it \
-    is — but treat the role as a semantic label that informs style \
-    and material, not as a shape instruction that permits unusual \
-    outlines.
-
-  * The architectural body's real-world AABB must coincide EXACTLY \
-    with the rectangular body: the extreme points along every axis \
-    are the eight corners of the slab itself, nothing beyond them.
-
-TERRAIN RULES (case B only):
-
-  * The mesh MUST read as an ORGANIC, IRREGULAR LANDFORM whose shape \
-    is carried by ACTUAL GEOMETRY, not by surface texture painted on \
-    a box. An island that renders as a rectangular brown slab with \
-    moss on top is a TOTAL FAILURE. The silhouette against the studio \
-    backdrop must look like the real landform — a dome, a bowl, a \
-    ridge, a mound — NOT a cuboid.
-
-  * Describe the 3D SHAPE in the prompt: where the surface rises, \
-    where it falls, how the edges taper (e.g. "a roughly circular \
-    domed island rising as a soft mossy crown at the centre and \
-    tapering organically to thin muddy lips at the perimeter"; "a \
-    rocky crater bowl with a raised uneven rim ringing a concave \
-    stony depression"). The landform is still a SOLID CONTINUOUS \
-    MASS — a crater's inside is a bowl CUT INTO the top of a solid \
-    body, not a hole through it.
-
-  * Do NOT use "slab", "panel", "block", "cube", or "rectangular \
-    body" in terrain prompts unless explicitly negated."""
+def wrap_image_prompt(description: str, proxy_shape: ProxyShape | None) -> str:
+    """Slot the LLM's noun phrase into the fixed image-generation
+    template. Hitbox + silhouette terms are picked from the proxy."""
+    hitbox, silhouette = _HITBOX_TERMS[proxy_shape]
+    return (
+        f"Generate a realistic orthographic front view of {description} "
+        f"that roughly can be captured within {_article(hitbox)} {hitbox} "
+        "hitbox without bending or deforming the object's natural "
+        f"proportions. The object should not fully be in {_article(silhouette)} "
+        f"{silhouette} shape unless it is naturally that shape. Prioritize "
+        "realism over confinement to the hitbox shape. Render against a "
+        "clean, empty white background with no other objects or graphics. "
+        "Capture the entire model in the image."
+    )
 
 
 def render_image_prompt(
@@ -1349,33 +1220,31 @@ def render_image_prompt(
     prompt: str,
     bbox: BoundingBox,
     proxy_shape: ProxyShape | None,
-    scenario: Literal["anchor", "encapsulating", "negative-space"],
     prior_prompts: list[str],
 ) -> str:
     w, h, d = bbox.size
-    suffix = ENCAPSULATING_IMAGE_SUFFIX if scenario == "encapsulating" else ""
+    template_preview = wrap_image_prompt(_SUBJECT_SLOT, proxy_shape)
     if prior_prompts:
-        prior_lines = "\n\n".join(
+        prior_lines = "\n".join(
             f"  {i + 1}. {p}" for i, p in enumerate(prior_prompts)
         )
         prior_block = (
-            "Prior Nano Banana prompts already emitted in this scene "
-            f"(chronological, {len(prior_prompts)} total):\n{prior_lines}"
+            f"Prior subject phrases in this scene ({len(prior_prompts)} "
+            f"total):\n{prior_lines}"
         )
     else:
         prior_block = (
-            "Prior Nano Banana prompts already emitted in this scene: "
-            "(none — this is the first object, you are setting the "
-            "aesthetic baseline for the scene)."
+            "Prior subject phrases in this scene: (none — this is the "
+            "first object; you are setting the aesthetic baseline)."
         )
     return (
         f"Original object prompt: {prompt!r}\n"
         f"Bounding box dimensions: width={w:.2f}m, height={h:.2f}m, depth={d:.2f}m\n"
         f"Proxy shape: {_render_proxy_shape(proxy_shape)}\n\n"
+        f"Image-prompt template your phrase will be slotted into "
+        f"(`{_SUBJECT_SLOT}` is your output):\n  {template_preview}\n\n"
         f"{prior_block}\n\n"
-        "Rewrite as a Nano Banana Pro image prompt that produces a clean "
-        "reference image of this object for an image-to-3D pipeline."
-        f"{suffix}"
+        "Produce ONE short noun phrase naming the subject."
     )
 
 
@@ -1384,14 +1253,15 @@ def render_next_object(
     zone_id: str,
     zone_prompt: str,
     zone_bbox: BoundingBox,
-    scene: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None]],
+    scene: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, float]],
     prior_attempts: list[tuple[ObjectSpec, str]] | None = None,
 ) -> str:
     scene_lines = (
         "\n".join(
             f"  - {nid}: prompt={prompt!r} bbox={bbox.model_dump_json()} "
-            f"proxy_shape={_render_proxy_shape(proxy)} parent={pid!r}"
-            for nid, prompt, bbox, pid, proxy in scene
+            f"proxy_shape={_render_proxy_shape(proxy)} "
+            f"orientation={orient:.3f}rad parent={pid!r}"
+            for nid, prompt, bbox, pid, proxy, orient in scene
         )
         if scene
         else "  (none)"

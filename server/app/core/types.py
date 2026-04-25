@@ -136,6 +136,10 @@ class Node(BaseModel):
     prompt: str
     bbox: BoundingBox
     proxy_shape: ProxyShape | None = None
+    # Yaw, radians, world-frame rotation about +Y. Zero = the mesh's
+    # canonical front (Trellis output's +Z) faces world +Z (toward viewer).
+    # Positive = right-handed yaw (front rotates toward world -X).
+    orientation: float = 0.0
     relationships: list[Relationship] = Field(default_factory=list)
     mesh_url: str | None = None
     parent_id: str | None = None

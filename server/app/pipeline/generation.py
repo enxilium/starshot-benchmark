@@ -52,6 +52,7 @@ from app.core.prompts import (
     render_next_object,
     render_object_bbox_batch,
     render_object_decomp,
+    wrap_image_prompt,
 )
 from app.core.types import BoundingBox, Node, ProxyShape
 from app.services import llm, threed
@@ -69,8 +70,11 @@ def _artifact_url(runs_dir: Path, path: Path) -> str:
 # shape can evolve without combing every call site.
 def _scene_view(
     nodes: list[Node],
-) -> list[tuple[str, str, BoundingBox, str | None, ProxyShape | None]]:
-    return [(n.id, n.prompt, n.bbox, n.parent_id, n.proxy_shape) for n in nodes]
+) -> list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, float]]:
+    return [
+        (n.id, n.prompt, n.bbox, n.parent_id, n.proxy_shape, n.orientation)
+        for n in nodes
+    ]
 
 
 RELATIONSHIP_RETRY_ATTEMPTS = 3
@@ -200,13 +204,14 @@ async def _resolve_and_generate(
         prior_prompts = committed_image_prompts + [r.prompt for r in resolved]
         image_prompt = await _build_image_prompt(
             prompt=spec.prompt, bbox=bbox, proxy_shape=spec.proxy_shape,
-            scenario=scenario, prior_prompts=prior_prompts,
+            prior_prompts=prior_prompts,
         )
         resolved.append(Node(
             id=spec.id,
             prompt=image_prompt,
             bbox=bbox,
             proxy_shape=spec.proxy_shape,
+            orientation=spec.orientation,
             relationships=list(spec.relationships),
             parent_id=spec.parent,
         ))
@@ -221,18 +226,17 @@ async def _build_image_prompt(
     prompt: str,
     bbox: BoundingBox,
     proxy_shape: ProxyShape | None,
-    scenario: Literal["anchor", "encapsulating", "negative-space"],
     prior_prompts: list[str],
 ) -> str:
     out = await llm.call_llm(
         system=SYSTEM_IMAGE_PROMPT,
         user=render_image_prompt(
             prompt=prompt, bbox=bbox, proxy_shape=proxy_shape,
-            scenario=scenario, prior_prompts=prior_prompts,
+            prior_prompts=prior_prompts,
         ),
         output_schema=ImagePromptOutput,
     )
-    return out.prompt
+    return wrap_image_prompt(out.prompt, proxy_shape)
 
 
 _pending: dict[str, list[asyncio.Task[None]]] = {}
@@ -260,7 +264,8 @@ async def _generate_one(
         async with _MESH_IO:
             scene = await asyncio.to_thread(trimesh.load, raw)
             rescaled = await asyncio.to_thread(
-                rescale_mesh_to_bbox, scene, node.bbox, mode=rescale_mode,
+                rescale_mesh_to_bbox, scene, node.bbox,
+                mode=rescale_mode, orientation=node.orientation,
             )
             await asyncio.to_thread(rescaled.export, path, file_type="glb")
             del scene, rescaled

@@ -11,12 +11,10 @@ from __future__ import annotations
 import json
 import os
 
-import httpx
+from openrouter import OpenRouter
 from pydantic import BaseModel, ValidationError
 
 from app.utils import cache, logging
-
-_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 _current_model: str | None = None
 
@@ -44,40 +42,43 @@ async def call_llm[T: BaseModel](
     if hit is not None:
         return output_schema.model_validate(hit)
 
-    body: dict[str, object] = {
-        "model": _current_model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": output_schema.__name__,
-                "strict": True,
-                "schema": _strip_array_lengths(output_schema.model_json_schema()),
-            },
-        },
-        "max_tokens": 4096,
-    }
-
     for attempt in range(4):
-        async with httpx.AsyncClient(timeout=180.0) as http:
-            resp = await http.post(
-                _URL,
-                headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
-                json=body,
+        async with OpenRouter(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            timeout_ms=180_000,
+        ) as client:
+            response = await client.chat.send_async(
+                model=_current_model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": output_schema.__name__,
+                        "strict": True,
+                        "schema_": _strip_array_lengths(
+                            output_schema.model_json_schema()
+                        ),
+                    },
+                },
+                reasoning={"effort": "xhigh"},
             )
-        data = resp.json()
-        if "choices" not in data:
-            raise RuntimeError(f"OpenRouter HTTP {resp.status_code}: {data}")
         try:
-            content = data["choices"][0]["message"]["content"]  # type: ignore[index]
+            message = response.choices[0].message
+            content = message.content
             args = json.loads(content) if isinstance(content, str) else content
             validated = output_schema.model_validate(args)
-            logging.log("cache.llm", key=key, output=validated.model_dump(mode="json"))
+            reasoning = getattr(message, "reasoning", None) or ""
+            logging.log(
+                "cache.llm",
+                key=key,
+                output=validated.model_dump(mode="json"),
+                reasoning=reasoning,
+            )
             return validated
-        except (ValidationError, ValueError, KeyError, IndexError, TypeError) as e:
+        except (ValidationError, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             if attempt == 3:
                 raise
             logging.log("llm.retry", reason=f"{type(e).__name__}: {str(e)[:160]}")
