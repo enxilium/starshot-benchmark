@@ -58,7 +58,7 @@ async def call_llm[T: BaseModel](
                     "json_schema": {
                         "name": output_schema.__name__,
                         "strict": True,
-                        "schema_": _strip_array_lengths(
+                        "schema_": _normalize_schema(
                             output_schema.model_json_schema()
                         ),
                     },
@@ -85,17 +85,30 @@ async def call_llm[T: BaseModel](
     raise AssertionError("unreachable")
 
 
-def _strip_array_lengths(schema: object) -> object:
-    """Recursively drop `minItems`/`maxItems`. Pydantic emits them for
-    fixed-length tuples (e.g. `tuple[float, float, float]` → minItems=3),
-    which some providers (Anthropic) reject outright. Pydantic still
-    validates the constraint on the parsed response."""
+def _normalize_schema(schema: object) -> object:
+    """Recursively normalize the Pydantic-emitted schema for providers that
+    reject draft-2020-12 features. Two transforms:
+
+      * Drop `minItems`/`maxItems` — Anthropic rejects them on `array`.
+      * Collapse `prefixItems` (Pydantic emits this for fixed-length
+        tuples like `tuple[float, float, float]`) into a single `items`
+        schema. Anthropic rejects `prefixItems` outright. We assume
+        homogeneous tuples (all our tuples are `Vec3` of floats); the
+        first prefix item is reused as `items`.
+
+    Pydantic still enforces the original constraints on the parsed
+    response, so loosening the wire schema is safe."""
     if isinstance(schema, dict):
-        return {
-            k: _strip_array_lengths(v)
-            for k, v in schema.items()
-            if k not in {"minItems", "maxItems"}
-        }
+        out = {}
+        for k, v in schema.items():
+            if k in {"minItems", "maxItems"}:
+                continue
+            if k == "prefixItems":
+                if isinstance(v, list) and v and "items" not in schema:
+                    out["items"] = _normalize_schema(v[0])
+                continue
+            out[k] = _normalize_schema(v)
+        return out
     if isinstance(schema, list):
-        return [_strip_array_lengths(v) for v in schema]
+        return [_normalize_schema(v) for v in schema]
     return schema

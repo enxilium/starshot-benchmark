@@ -249,7 +249,6 @@ async def _generate_one(
     path: Path,
     image_stem: Path,
     runs_dir: Path,
-    rescale_mode: Literal["fill", "cover"],
 ) -> None:
     try:
         paths = await threed.generate_mesh(
@@ -265,7 +264,7 @@ async def _generate_one(
             scene = await asyncio.to_thread(trimesh.load, raw)
             rescaled = await asyncio.to_thread(
                 rescale_mesh_to_bbox, scene, node.bbox,
-                mode=rescale_mode, orientation=node.orientation,
+                orientation=node.orientation,
             )
             await asyncio.to_thread(rescaled.export, path, file_type="glb")
             del scene, rescaled
@@ -285,7 +284,6 @@ async def _spawn_meshes(
 ) -> list[Node]:
     objs_dir = runs_dir / run_id / "objects"
     objs_dir.mkdir(parents=True, exist_ok=True)
-    rescale_mode = "fill" if scenario == "encapsulating" else "cover"
 
     out: list[Node] = []
     pending = _pending.setdefault(run_id, [])
@@ -303,7 +301,6 @@ async def _spawn_meshes(
                     path=path,
                     image_stem=image_stem,
                     runs_dir=runs_dir,
-                    rescale_mode=rescale_mode,
                 ),
             )
         )
