@@ -127,10 +127,20 @@ roots, dominated by a lone lightning-split stump that reads as the \
 island's character from any angle".
 
 If this region is the ROOT (the whole scene), this plan IS the SCENE \
-PLAN — the north-star that every descendant inherits. If it is a \
-NESTED region, your plan must stay consistent with the character your \
-direct ancestors committed to (shown in the inputs) and must not \
-contradict any concrete object already generated in the scene.
+PLAN — the north-star that every descendant inherits. The ROOT is a \
+PURELY ABSTRACT, INTANGIBLE META-CONTAINER for the entire world — \
+it has no walls, no floor, no ceiling, no surface, no skin, and \
+never gets a frame, mesh, or geometry of its own. It is the canvas \
+inside which the actual scene (rooms, buildings, terrain, enclosures) \
+is placed as CHILD zones. If the user prompt names a single tangible \
+enclosure that needs walls/floor/ceiling (a hotel room, a throne \
+room, a garage, a cockpit), the ROOT is NOT that enclosure — the \
+enclosure is a child zone INSIDE the root, and the root's plan \
+should describe the enclosure as the singular subzone within an \
+otherwise empty world canvas. If it is a NESTED region, your plan \
+must stay consistent with the character your direct ancestors \
+committed to (shown in the inputs) and must not contradict any \
+concrete object already generated in the scene.
 
 <what_to_write>
 ONE cohesive paragraph (no headers, no lists), roughly 5-10 \
@@ -256,10 +266,18 @@ class OverallBboxOutput(BaseModel):
 SYSTEM_OVERALL_BBOX = """\
 You are picking the OVERALL bounding box for a 3D scene — the SCENE'S \
 CANVAS that every zone, object, and ambient element will be placed \
-inside. This pipeline is part of StarshotBench, a head-to-head LLM \
-benchmark. The SCENE PLAN has already been authored upstream and is \
-shown to you in the inputs; your job is to size the canvas so it \
-matches the silhouette that plan implies. Get this wrong and every \
+inside. This box is a PURELY ABSTRACT, INTANGIBLE META-CONTAINER for \
+the world: it has no walls, no floor, no ceiling, no skin, and never \
+becomes a tangible frame or mesh. It only sets the outer extents of \
+the world the scene lives in. If the scene is a single tangible \
+enclosure (a hotel room, a throne room, a cockpit), the canvas \
+should be SLIGHTLY LARGER than that enclosure, so the actual room \
+fits comfortably as a child zone inside it with a small margin of \
+empty world around it — the canvas is NOT the room. This pipeline is \
+part of StarshotBench, a head-to-head LLM benchmark. The SCENE PLAN \
+has already been authored upstream and is shown to you in the \
+inputs; your job is to size the canvas so it matches the silhouette \
+that plan implies. Get this wrong and every \
 downstream step is fighting the canvas — a skyscraper crammed into a \
 cube, a river squeezed into a square, a room ballooned into a \
 warehouse. Match the scene's actual silhouette: a skyscraper is tall \
@@ -294,34 +312,47 @@ def render_overall_bbox(user_prompt: str, scene_plan: str) -> str:
 # ---------- Step 3: zone decompose (atomic vs subzones; runs after plan) ----
 
 
-class SubzoneSeed(BaseModel):
-    """A subzone the decomposer commits to. Just `id` + `prompt` —
-    each child's high-level plan is authored later by the child's own
-    ZONE PLAN step when `_build` recurses into it."""
-
+class ChildNodeSpec(BaseModel):
     id: str
     prompt: str
+    proxy_shape: ProxyShape | None = None
+    relationships: list[Relationship] = Field(default_factory=list)
+
+    @field_validator("proxy_shape", mode="before")
+    @classmethod
+    def _box_means_none(cls, v: object) -> object:
+        # The prompt describes BOX as "null/omitted" — no enum value — but
+        # some models emit the literal string "BOX" anyway. Treat it as None.
+        if isinstance(v, str) and v.upper() == "BOX":
+            return None
+        return v
 
 
 class ZoneDecomposeOutput(BaseModel):
     is_atomic: bool
-    subzones: list[SubzoneSeed] = Field(default_factory=list)
+    children: list[ChildNodeSpec] = Field(default_factory=list)
 
 
 SYSTEM_ZONE_DECOMPOSE = """\
 You are deciding the STRUCTURE of a zone in a 3D scene built for \
 StarshotBench. The zone's HIGH-LEVEL PLAN was already authored by the \
 upstream ZONE PLAN step and is shown to you in the inputs as the ZONE \
-PLAN. Your single job: decide whether this zone is ATOMIC (a leaf — \
-its next level of detail is individual anchor objects, materialized \
-later by the generation pipeline) or SUBDIVIDES into child zones, and \
-if it subdivides, enumerate the child zones as seed (id, prompt) \
-pairs.
+PLAN. Your job: decide whether this zone is ATOMIC (a leaf — its \
+next level of detail is individual anchor objects, materialized later \
+by the generation pipeline) or SUBDIVIDES into child zones, and if it \
+subdivides, emit each child fully structured — `id`, `prompt`, \
+optional `proxy_shape`, and the `relationships` that anchor it inside \
+the parent. Subdivision and per-child structure are codependent (you \
+cannot anchor children you have not committed to, and you cannot \
+commit to children without imagining their layout), so they belong \
+in the same step.
 
-You do NOT (re-)author the zone's plan, do NOT pick coordinates or \
-proxy shapes or relationships, and do NOT author each child's full \
-plan. Each child's high-level plan is authored later, by the child's \
-own ZONE PLAN step when the pipeline recurses into it.
+You do NOT (re-)author the zone's plan and do NOT author each child's \
+full plan. Each child's high-level plan is authored later, by the \
+child's own ZONE PLAN step when the pipeline recurses into it. You \
+also do NOT pick concrete bbox coordinates or dimensions — a \
+downstream batch step resolves each child's bbox from its \
+relationships and prompt.
 
 <zone_definition>
 A zone is a REGION OF THE SCENE — a subscene, an area, a place large \
@@ -356,10 +387,28 @@ each deserving its own dedicated plan and focus. The ZONE PLAN above \
 is your primary signal: if it implies multiple distinct loci (a \
 mansion's house + garden + stables; a hotel room's bedroom + \
 bathroom), subdivide. If it implies a single coherent place, mark it \
-atomic. If you cannot give each proposed child a unique, named \
+atomic.
+
+ROOT EXCEPTION — the ROOT zone (no ancestors) is a PURELY ABSTRACT, \
+INTANGIBLE META-CONTAINER for the whole world. It has no walls, \
+floor, ceiling, or geometry of its own and never receives a frame \
+pass — only NON-root child zones get walls/floor/ceiling. Therefore \
+if the user prompt names a single tangible enclosure that needs a \
+frame (a hotel room, a throne room, a chapel, a garage, a cockpit, \
+a shipping container, a jail cell — anything with walls/floor/ceiling \
+or an explicit shell), the ROOT MUST SUBDIVIDE into at least one \
+child zone that IS that enclosure. Marking such a root atomic is \
+WRONG — it leaves the scene with no walls/floor/ceiling at all, \
+because the root never gets a frame. In this single-enclosure case, \
+emit one subzone whose prompt names the enclosure (e.g. "the hotel \
+room interior — its walls, floor, ceiling, and the volume they \
+contain"); that single child becomes a legitimate atomic zone of \
+its own when ZONE DECOMPOSE recurses into it. A root with multiple \
+distinct loci subdivides the normal way (mansion → house + garden + \
+stables). If you cannot give each proposed child a unique, named \
 reason to exist beyond "this is the left part of the parent" or \
 "this is the denser part of the parent", STOP — emit is_atomic=true \
-with subzones=[].
+with children=[].
 
 The sharpest test: if the "thing" you would carve out is essentially \
 ONE SINGLE ARTIFACT — a statue, a monument, an obelisk, a trophy, a \
@@ -439,15 +488,20 @@ atomic.
 </atomic_vs_subdivides>
 
 <inputs>
-  * The zone being decomposed: its id, prompt, and axis-aligned \
-    bounding box (in meters, under the canonical front view: +X \
-    right, +Y up, +Z front).
+  * The zone being decomposed: its id (PARENT_ID), prompt, and \
+    axis-aligned bounding box (in meters, under the canonical front \
+    view: +X right, +Y up, +Z front).
   * The ZONE PLAN — the high-level character/intent plan authored \
     upstream for this zone. This is your primary signal. Let its \
     named features and implied loci drive your decision.
+  * The SCENE PROMPT and SCENE PLAN — the root's prompt and plan, \
+    the north-star for the whole scene.
   * The ANCESTOR CHAIN — every zone above this one in the tree, \
-    root first, each with its plan. The root's plan IS the SCENE \
-    PLAN.
+    root first, each with its plan.
+  * The PRIOR ZONES — every non-root zone already declared in the \
+    run, with its parent and plan. Lateral context: siblings, \
+    cousins, and earlier subtrees may inform how THIS zone is \
+    structured and anchored.
   * The GENERATED OBJECTS — every concrete (mesh-bearing) object \
     placed anywhere in the scene so far, with its parent.
 </inputs>
@@ -460,9 +514,9 @@ Emit a single ZoneDecomposeOutput with two fields:
     materialized later by the generation pipeline. Most zones end \
     up atomic.
 
-  * `subzones` — list of SubzoneSeed. EMPTY when is_atomic=true. \
-    REQUIRED when is_atomic=false: at least two seeds, one per \
-    child zone you are committing to. Each seed has:
+  * `children` — list of ChildNodeSpec. EMPTY when is_atomic=true. \
+    REQUIRED when is_atomic=false: at least two children (or \
+    exactly one for the ROOT EXCEPTION case). Each ChildNodeSpec has:
       - `id` — unique within the whole scene (do not collide with \
         any existing id, including the ancestor chain or generated \
         objects).
@@ -471,7 +525,32 @@ Emit a single ZoneDecomposeOutput with two fields:
         when its ZONE PLAN step runs, but NOT a full plan. Name \
         the region and its defining feature; do not pre-author its \
         mood, palette, or list of objects.
+      - `proxy_shape` — OPTIONAL. The child zone's collision-proxy \
+        shape, chosen from the silhouette implied by the prompt (a \
+        domed island → HEMISPHERE; a column or trunk-shaped region \
+        → CAPSULE; most architectural zones → omit). See the PROXY \
+        SHAPE section below.
+      - `relationships` — REQUIRED, at least one per child. Anchors \
+        the child inside the parent.
+
+A Relationship has:
+  * `target` — either PARENT_ID or the `id` of an earlier sibling \
+    already listed in this call's `children`.
+  * `kind` — one of: ON, BESIDE, BELOW, ABOVE, ATTACHED.
+  * `reference_point` — which CORNER of the TARGET's bbox this \
+    relationship anchors against, under the canonical front view \
+    (+X right, +Y up, +Z front). One of: TOP_LEFT_FRONT, \
+    TOP_LEFT_BACK, TOP_RIGHT_FRONT, TOP_RIGHT_BACK, \
+    BOTTOM_LEFT_FRONT, BOTTOM_LEFT_BACK, BOTTOM_RIGHT_FRONT, \
+    BOTTOM_RIGHT_BACK.
+
+Do NOT pick concrete coordinates or dimensions — a downstream batch \
+step resolves each child's bbox from its relationships and prompt.
 </output>
+
+<proxy_shape>
+""" + PROXY_SHAPE_DOC + """
+</proxy_shape>
 
 Respond with ONE JSON object matching the schema. No prose, no markdown, no code fences.\
 """
@@ -485,13 +564,18 @@ def render_zone_decompose(
     zone_plan: str,
     ancestors: list[tuple[str, str, str]],
     objects: list[tuple[str, str, str | None]],
+    scene_prompt: str,
+    scene_plan: str,
+    prior_zones: list[tuple[str, str, str, str]],
 ) -> str:
     """ancestors: (id, prompt, plan) tuples from root → parent of this zone,
     excluding the zone itself. Empty for the root.
     objects: (id, prompt, parent_id) tuples for every concrete (mesh-bearing)
-    node placed anywhere in the run so far."""
+    node placed anywhere in the run so far.
+    prior_zones: (id, prompt, plan, parent_id) for every non-root zone
+    already declared in the run, in declaration order."""
     zone_block = (
-        f"ZONE_ID (being decomposed): {zone_id!r}\n"
+        f"PARENT_ID (the zone being decomposed): {zone_id!r}\n"
         f"Zone prompt: {zone_prompt!r}\n"
         f"Zone bbox: {zone_bbox.model_dump_json()}\n"
         f"ZONE PLAN (authored upstream — your primary signal):\n{zone_plan}"
@@ -505,6 +589,15 @@ def render_zone_decompose(
         )
     else:
         ancestor_block = "  (none — this zone is the root)"
+    if prior_zones:
+        prior_block = "\n".join(
+            f"  - id={zid!r} parent={zparent!r}\n"
+            f"    prompt: {zprompt}\n"
+            f"    plan: {zplan}"
+            for zid, zprompt, zplan, zparent in prior_zones
+        )
+    else:
+        prior_block = "  (none)"
     if objects:
         obj_block = "\n".join(
             f"  - id={oid!r} parent={oparent!r}: {oprompt}"
@@ -513,145 +606,18 @@ def render_zone_decompose(
     else:
         obj_block = "  (none — no concrete objects placed yet)"
     return (
+        f"Overall scene prompt: {scene_prompt!r}\n\n"
+        f"SCENE PLAN (the north-star for the whole scene):\n{scene_plan}\n\n"
         f"Ancestor chain (root first → your direct parent, with each "
         f"ancestor's plan):\n{ancestor_block}\n\n"
+        f"Prior zones declared so far (lateral scene context):\n"
+        f"{prior_block}\n\n"
         f"Generated objects placed so far:\n{obj_block}\n\n"
         f"{zone_block}\n\n"
         "Decide whether this zone is atomic or subdivides. If it "
-        "subdivides, emit one (id, prompt) seed per child zone."
-    )
-
-
-# ---------- Step 3: children decomposition (zones) --------------------------
-
-
-class ChildNodeSpec(BaseModel):
-    id: str
-    prompt: str
-    proxy_shape: ProxyShape | None = None
-    relationships: list[Relationship] = Field(default_factory=list)
-
-    @field_validator("proxy_shape", mode="before")
-    @classmethod
-    def _box_means_none(cls, v: object) -> object:
-        # The prompt describes BOX as "null/omitted" — no enum value — but
-        # some models emit the literal string "BOX" anyway. Treat it as None.
-        if isinstance(v, str) and v.upper() == "BOX":
-            return None
-        return v
-
-
-class ChildrenDecompOutput(BaseModel):
-    children: list[ChildNodeSpec] = Field(default_factory=list)
-
-
-SYSTEM_CHILDREN_DECOMP = """\
-You are the STRUCTURAL MATERIALIZATION step for a 3D scene zone in \
-StarshotBench. The atomic-vs-subdivides decision and the subzone \
-seed list were ALREADY made by the upstream ZONE DECOMPOSE step. \
-Your job is narrow: take the decomposer's subzone seeds and turn \
-each one into a concrete child spec by assigning a `proxy_shape` and \
-the `relationships` that anchor it inside the parent.
-
-You do NOT decide whether the zone subdivides. You do NOT add, remove, \
-rename, or rewrite subzones. You do NOT author plans. The seeds you \
-receive are authoritative — emit one ChildNodeSpec per seed, in the \
-same order, with the seed's `id` and `prompt` copied through verbatim. \
-Your only authored fields are `proxy_shape` and `relationships`.
-
-<inputs>
-  * The parent zone being decomposed: its id, prompt, bbox, and its \
-    own PLAN.
-  * Its SUBZONE SEEDS — one per child the decomposer committed to. \
-    Each seed has `id` and `prompt`. Read each seed's prompt; the \
-    silhouette implied by the prompt is what drives your \
-    `proxy_shape` choice and your relationship anchoring.
-  * The SCENE PLAN — the root zone's plan, the north-star for every \
-    step.
-  * The PRIOR SCENE CONTEXT — every zone already declared in the run, \
-    with their plans. Use this to stay coherent.
-</inputs>
-
-<output>
-Emit one `ChildNodeSpec` per subzone seed, in the same order. For each:
-  * `id` — copy the seed's id verbatim.
-  * `prompt` — copy the seed's prompt verbatim.
-  * `proxy_shape` — OPTIONAL. The child zone's collision-proxy shape, \
-    chosen from the silhouette implied by the seed's prompt (a domed \
-    island → HEMISPHERE; a column or trunk-shaped region → CAPSULE; \
-    most architectural zones → omit). See the PROXY SHAPE section.
-  * `relationships` — REQUIRED, at least one per child. Anchors the \
-    child inside the parent.
-
-A Relationship has:
-  * `target` — either the parent id (provided below as PARENT_ID) or \
-    the `id` of an earlier sibling already listed in this call's \
-    `children`.
-  * `kind` — one of: ON, BESIDE, BELOW, ABOVE, ATTACHED.
-  * `reference_point` — which CORNER of the TARGET's bbox this \
-    relationship anchors against, under the canonical front view (+X \
-    right, +Y up, +Z front). One of: TOP_LEFT_FRONT, TOP_LEFT_BACK, \
-    TOP_RIGHT_FRONT, TOP_RIGHT_BACK, BOTTOM_LEFT_FRONT, \
-    BOTTOM_LEFT_BACK, BOTTOM_RIGHT_FRONT, BOTTOM_RIGHT_BACK.
-
-Do NOT pick concrete coordinates or dimensions — a downstream batch \
-step resolves each child's bbox from its relationships and prompt.
-
-Number of `children` MUST equal the number of subzone seeds. Do not \
-omit a seed and do not invent extra children.
-</output>
-
-<proxy_shape>
-""" + PROXY_SHAPE_DOC + """
-</proxy_shape>
-
-Respond with ONE JSON object matching the schema. No prose, no markdown, no code fences.\
-"""
-
-
-def render_children_decomp(
-    *,
-    prompt: str,
-    bbox: BoundingBox,
-    plan: str,
-    subzones: list["SubzoneSeed"],
-    parent_id: str,
-    scene_prompt: str,
-    scene_plan: str,
-    prior_zones: list[tuple[str, str, str, str]],
-) -> str:
-    """prior_zones: list of (id, prompt, plan, parent_id) for every non-root
-    zone already declared in the run, in declaration order. The root is
-    communicated separately via scene_prompt + scene_plan. `plan` is the
-    zone's own plan, written by the ZONE PLAN step. `subzones` is the seed
-    list authored by the ZONE DECOMPOSE step — id+prompt per child."""
-    if prior_zones:
-        lines = []
-        for zid, zprompt, zplan, zparent in prior_zones:
-            lines.append(
-                f"  - id={zid!r} parent={zparent!r}\n"
-                f"    prompt: {zprompt}\n"
-                f"    plan: {zplan}"
-            )
-        prior_block = "\n".join(lines)
-    else:
-        prior_block = "  (none)"
-    seed_lines = "\n\n".join(
-        f"  - id={s.id!r}\n"
-        f"    prompt: {s.prompt}"
-        for s in subzones
-    )
-    return (
-        f"Overall scene prompt: {scene_prompt!r}\n\n"
-        f"SCENE PLAN (the north-star for the whole scene):\n{scene_plan}\n\n"
-        f"Prior zones declared so far:\n{prior_block}\n\n"
-        f"PARENT_ID (the zone being decomposed): {parent_id!r}\n"
-        f"Parent prompt: {prompt!r}\n"
-        f"Parent bbox: {bbox.model_dump_json()}\n"
-        f"Parent PLAN:\n{plan}\n\n"
-        f"Subzone seeds to materialize ({len(subzones)}):\n{seed_lines}\n\n"
-        "Emit one ChildNodeSpec per seed (same order, copy id+prompt "
-        "verbatim). Author proxy_shape (optional) and relationships."
+        "subdivides, emit one ChildNodeSpec per child — id, prompt, "
+        "optional proxy_shape, and the relationships that anchor it "
+        "inside the parent."
     )
 
 

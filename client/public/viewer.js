@@ -370,6 +370,7 @@ let hoveredBboxId = null;
 
 const BBOX_COLOR_DEFAULT = 0xff3b3b;
 const BBOX_COLOR_OBJECT = 0x6bd96e;
+const BBOX_COLOR_FRAME = 0x7fb3d5;
 const BBOX_COLOR_PROXY = 0xb46aff;
 const BBOX_COLOR_HOVER = 0xffe14a;
 const BBOX_COLOR_SELECTED = 0x4af0e0;
@@ -796,6 +797,7 @@ function applyBboxColor(id) {
   const base =
     helper.userData.proxyShape ? BBOX_COLOR_PROXY
     : helper.userData.nodeKind === "object" ? BBOX_COLOR_OBJECT
+    : helper.userData.nodeKind === "frame" ? BBOX_COLOR_FRAME
     : BBOX_COLOR_DEFAULT;
   const color =
     id === selectedBboxId ? BBOX_COLOR_SELECTED

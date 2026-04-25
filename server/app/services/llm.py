@@ -58,13 +58,12 @@ async def call_llm[T: BaseModel](
                     "json_schema": {
                         "name": output_schema.__name__,
                         "strict": True,
-                        "schema_": _normalize_schema(
-                            output_schema.model_json_schema()
-                        ),
+                        "schema_": _normalize_schema(output_schema.model_json_schema()),
                     },
                 },
-                reasoning={"effort": "high"},
+                reasoning={"effort": "xhigh"},
             )
+        content: object = None
         try:
             message = response.choices[0].message
             content = message.content
@@ -78,6 +77,14 @@ async def call_llm[T: BaseModel](
                 reasoning=reasoning,
             )
             return validated
+        except json.JSONDecodeError as e:
+            if attempt == 3:
+                raise
+            logging.log(
+                "llm.retry",
+                reason=f"JSONDecodeError: {str(e)[:160]}",
+                content=content if isinstance(content, str) else repr(content),
+            )
         except (ValidationError, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             if attempt == 3:
                 raise

@@ -7,16 +7,15 @@ Flow per node:
   2. (root only) Overall bounding box (LLM) — sizes the canvas to match
      the silhouette implied by the root's plan.
   3. ZONE DECOMPOSE (LLM) — decides atomic vs subdivides; if subdivides,
-     emits one (id, prompt) seed per child zone. Children's plans are
-     authored later by their own ZONE PLAN call when `_build` recurses.
-  4. Children materialization (LLM) — runs only when the decomposer said
-     subdivides. Assigns each seed a proxy_shape and the relationships
-     anchoring it inside the parent. The sibling-relationship DAG is
-     checked for cycles; any cycle is logged and accepted (advisory).
-  5. Batch-resolve a bbox for EVERY child in one LLM call.
-  6. Hand each placed child to Phase 2 generation for its encapsulating
+     emits each child fully structured (id, prompt, proxy_shape,
+     relationships) in one call. Subdivision and per-child anchoring
+     are codependent, so they share the same step. The
+     sibling-relationship DAG is checked for cycles; any cycle is
+     logged and accepted (advisory).
+  4. Batch-resolve a bbox for EVERY child in one LLM call.
+  5. Hand each placed child to Phase 2 generation for its encapsulating
      geometry (walls, moat, fence, etc.) as objects.
-  7. Recurse on each child. Children arrive with `plan=None`; step 1
+  6. Recurse on each child. Children arrive with `plan=None`; step 1
      authors their plan fresh.
 
 Atomic leaves skip the recursion and are handed to Phase 2 generation for
@@ -31,17 +30,13 @@ from pathlib import Path
 from app.core.prompts import (
     BboxBatchOutput,
     ChildNodeSpec,
-    ChildrenDecompOutput,
     OverallBboxOutput,
-    SubzoneSeed,
-    SYSTEM_CHILDREN_DECOMP,
     SYSTEM_OVERALL_BBOX,
     SYSTEM_ZONE_BBOX_BATCH,
     SYSTEM_ZONE_DECOMPOSE,
     SYSTEM_ZONE_PLAN,
     ZoneDecomposeOutput,
     ZonePlanOutput,
-    render_children_decomp,
     render_overall_bbox,
     render_zone_bbox_batch,
     render_zone_decompose,
@@ -64,9 +59,9 @@ async def _pick_overall_bbox(prompt: str, scene_plan: str) -> BoundingBox:
 
 
 def _prior_zones(all_nodes: list[Node]) -> list[tuple[str, str, str, str]]:
-    """Zones already declared AND planned, excluding the root (which is
-    surfaced separately as the scene plan). Used by the structural
-    materialization step, which still wants the full lateral context."""
+    """Every non-root zone already declared AND planned. Used as lateral
+    scene context for the decomposition step so siblings/cousins can
+    inform a zone's structure and relationships."""
     out: list[tuple[str, str, str, str]] = []
     for n in all_nodes:
         if n.mesh_url is not None:
@@ -131,8 +126,11 @@ async def _decompose_zone(
     *, node: Node, all_nodes: list[Node],
 ) -> ZoneDecomposeOutput:
     """Decide atomic vs subdivides for an already-planned zone, and (if
-    subdividing) emit (id, prompt) seeds for each child."""
+    subdividing) emit each child fully structured (id, prompt,
+    proxy_shape, relationships) in one call."""
     assert node.plan is not None, "zone must be planned before decomposition"
+    root = all_nodes[0]
+    assert root.plan is not None, "root.plan must be set before decomposition"
     return await llm.call_llm(
         system=SYSTEM_ZONE_DECOMPOSE,
         user=render_zone_decompose(
@@ -142,36 +140,11 @@ async def _decompose_zone(
             zone_plan=node.plan,
             ancestors=_ancestors(node, all_nodes),
             objects=_generated_objects(all_nodes),
-        ),
-        output_schema=ZoneDecomposeOutput,
-    )
-
-
-async def _materialize_children(
-    *,
-    node: Node,
-    subzones: list[SubzoneSeed],
-    all_nodes: list[Node],
-) -> ChildrenDecompOutput:
-    """Materialize each subzone seed into a ChildNodeSpec by assigning a
-    proxy_shape and relationships. Atomicity, ids, and prompts are already
-    authored upstream — this step authors only structure."""
-    root = all_nodes[0]
-    assert root.plan is not None, "root.plan must be set before materialization"
-    assert node.plan is not None, "zone plan must be set before materialization"
-    return await llm.call_llm(
-        system=SYSTEM_CHILDREN_DECOMP,
-        user=render_children_decomp(
-            prompt=node.prompt,
-            bbox=node.bbox,
-            plan=node.plan,
-            subzones=subzones,
-            parent_id=node.id,
             scene_prompt=root.prompt,
             scene_plan=root.plan,
             prior_zones=_prior_zones(all_nodes),
         ),
-        output_schema=ChildrenDecompOutput,
+        output_schema=ZoneDecomposeOutput,
     )
 
 
@@ -215,7 +188,7 @@ async def _build(
         "divider.zone_decompose",
         node=node.id,
         is_atomic=decomp.is_atomic,
-        subzones=[s.model_dump() for s in decomp.subzones],
+        children=[c.model_dump() for c in decomp.children],
     )
 
     if decomp.is_atomic:
@@ -227,17 +200,8 @@ async def _build(
         logging.emit_step(node.id, "done")
         return
 
-    children_decomp = await _materialize_children(
-        node=node, subzones=decomp.subzones, all_nodes=all_nodes,
-    )
-    logging.log(
-        "divider.decompose",
-        node=node.id,
-        children=[{"id": c.id, "prompt": c.prompt} for c in children_decomp.children],
-    )
-
     try:
-        validate_sibling_relationships_acyclic(children_decomp.children)
+        validate_sibling_relationships_acyclic(decomp.children)
     except ValueError as e:
         logging.log(
             "divider.validate.relationships.accept_invalid",
@@ -246,11 +210,11 @@ async def _build(
 
     logging.emit_step(node.id, "resolving_bboxes", parent=node.id)
     bboxes = await _resolve_child_bboxes_batch(
-        parent=node, children=children_decomp.children,
+        parent=node, children=decomp.children,
     )
 
     placed: list[Node] = []
-    for spec in children_decomp.children:
+    for spec in decomp.children:
         child_bbox = bboxes[spec.id]
         logging.emit_bbox(
             spec.id, child_bbox,

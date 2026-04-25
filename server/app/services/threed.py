@@ -112,9 +112,7 @@ async def generate_mesh(
             "num_images": 1,
             "aspect_ratio": "1:1",
             "output_format": "png",
-            "resolution": "0.5K",
-            "limit_generations": True,
-            "thinking_level": "minimal",
+            "resolution": "1K",
         },
         stage="nano_banana",
     )
