@@ -64,6 +64,7 @@ async def call_llm[T: BaseModel](
                     },
                 },
                 reasoning={"effort": "xhigh"},
+                max_tokens=63956,
             )
         try:
             message = response.choices[0].message

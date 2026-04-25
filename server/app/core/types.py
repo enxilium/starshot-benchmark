@@ -123,13 +123,11 @@ class Node(BaseModel):
     """Tree node for the scene.
 
     Zones and objects are both Nodes. Zones are abstract (mesh_url is None)
-    and carry a high-level `plan` (zone identity/character) plus, when the
-    zone is decomposed, a `subzone_plan` (structural sketch of how it splits)
-    that seed downstream steps. Concrete nodes (objects) set mesh_url and
-    have neither. Each node stores only its parent id; the full tree is
-    recoverable via the run-scoped flat registry, but the pipeline emits
-    state to clients incrementally via SSE events rather than by traversing
-    the Node graph.
+    and carry a high-level `plan` (zone identity/character). Concrete nodes
+    (objects) set mesh_url and have no plan. Each node stores only its
+    parent id; the full tree is recoverable via the run-scoped flat
+    registry, but the pipeline emits state to clients incrementally via
+    SSE events rather than by traversing the Node graph.
     """
 
     id: str
@@ -144,4 +142,3 @@ class Node(BaseModel):
     mesh_url: str | None = None
     parent_id: str | None = None
     plan: str | None = None
-    subzone_plan: str | None = None
