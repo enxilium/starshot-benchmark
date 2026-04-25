@@ -6,12 +6,12 @@ guarantee is that the mesh is fully contained in the bbox.
 
 Orientation contract:
   Trellis 2 returns a mesh whose intrinsic front face points along +Z
-  in mesh frame. The Node's `orientation` is a yaw (radians, right-handed
-  about +Y) that rotates the mesh into world pose: 0 leaves the front
-  facing world +Z; π/2 turns the front to world -X. The image-prompt
-  step requests an orthographic head-on front view so Trellis's output
-  frame is predictable, leaving this rotation as the only orientation
-  knob.
+  in mesh frame. The Node's `orientation` is a yaw (integer degrees,
+  right-handed about +Y) that rotates the mesh into world pose: 0 leaves
+  the front facing world +Z; 90 turns the front to world -X. The
+  image-prompt step requests an orthographic head-on front view so
+  Trellis's output frame is predictable, leaving this rotation as the
+  only orientation knob.
 
 Order of operations: translate to origin → yaw → scale → translate to
 bbox center. Yaw is applied to the unscaled mesh so it composes cleanly
@@ -19,6 +19,8 @@ with per-axis scaling.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import trimesh
@@ -30,7 +32,7 @@ def rescale_mesh_to_bbox(
     mesh: trimesh.Trimesh | trimesh.Scene,
     bbox: BoundingBox,
     *,
-    orientation: float = 0.0,
+    orientation: int = 0,
 ) -> trimesh.Trimesh | trimesh.Scene:
     if mesh.is_empty:
         raise ValueError("cannot rescale an empty mesh")
@@ -40,7 +42,7 @@ def rescale_mesh_to_bbox(
     # origin-centered AABB doesn't preserve centering — vertex positions
     # don't have to be symmetric inside their AABB, so a rotation around
     # the AABB centre can land the new AABB off-origin.
-    R = trimesh.transformations.rotation_matrix(orientation, [0.0, 1.0, 0.0])
+    R = trimesh.transformations.rotation_matrix(math.radians(orientation), [0.0, 1.0, 0.0])
     out.apply_transform(R)
 
     rotated_min, rotated_max = out.bounds

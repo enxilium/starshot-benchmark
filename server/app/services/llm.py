@@ -78,13 +78,15 @@ async def call_llm[T: BaseModel](
             )
             return validated
         except json.JSONDecodeError as e:
-            if attempt == 3:
-                raise
             logging.log(
-                "llm.retry",
-                reason=f"JSONDecodeError: {str(e)[:160]}",
+                "llm.json_decode_error",
+                reason=f"JSONDecodeError: {e}",
+                attempt=attempt,
+                final=attempt == 3,
                 content=content if isinstance(content, str) else repr(content),
             )
+            if attempt == 3:
+                raise
         except (ValidationError, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             if attempt == 3:
                 raise

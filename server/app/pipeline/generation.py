@@ -70,7 +70,7 @@ def _artifact_url(runs_dir: Path, path: Path) -> str:
 # shape can evolve without combing every call site.
 def _scene_view(
     nodes: list[Node],
-) -> list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, float]]:
+) -> list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, int]]:
     return [
         (n.id, n.prompt, n.bbox, n.parent_id, n.proxy_shape, n.orientation)
         for n in nodes

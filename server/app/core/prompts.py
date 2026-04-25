@@ -727,11 +727,14 @@ class ObjectSpec(ChildNodeSpec):
     """A single object in a zone. Inherits id/prompt/relationships."""
 
     parent: str
-    # Yaw, radians, world-frame rotation about +Y. 0 = front faces world +Z
-    # (toward viewer); π/2 = front faces world -X (rotated right-hand). The
-    # mesh comes back from Trellis with its intrinsic front along +Z; this
-    # field rotates it into the world pose the LLM intends.
-    orientation: float = 0.0
+    # Yaw, integer degrees, world-frame rotation about +Y. 0 = front faces
+    # world +Z (toward viewer); 90 = front faces world -X (rotated
+    # right-hand). The mesh comes back from Trellis with its intrinsic
+    # front along +Z; this field rotates it into the world pose the LLM
+    # intends. Bounded `[-180, 180]` so the JSON Schema integer grammar
+    # caps tokens — a free-float field lets some providers loop forever
+    # in the exponent (`e-3055758…`) and torch the response.
+    orientation: int = Field(default=0, ge=-180, le=180)
 
 
 class ObjectDecompOutput(BaseModel):
@@ -867,21 +870,21 @@ For each object, emit:
     resting on the actual dome. Omit for architectural shells (walls, \
     floors, ceilings, fences) and any object whose bbox is already a \
     good silhouette.
-  * `orientation` — REQUIRED FLOAT (radians, default 0.0). World-frame \
-    yaw about +Y for the generated mesh. The image-to-3D model receives \
-    an ORTHOGRAPHIC FRONT VIEW of the object, so its mesh comes back \
-    with the visible front face along world +Z. `orientation` is the \
-    additional rotation needed to point the object's "front" the right \
-    way in the world. Right-handed about +Y: `0.0` keeps the front \
-    facing +Z (the viewer); `π/2` (≈1.5708) rotates the front to face \
-    -X; `π` (≈3.1416) faces -Z (away); `-π/2` (≈-1.5708) faces +X. \
+  * `orientation` — REQUIRED INTEGER DEGREES in [-180, 180] (default 0). \
+    World-frame yaw about +Y for the generated mesh. The image-to-3D \
+    model receives an ORTHOGRAPHIC FRONT VIEW of the object, so its \
+    mesh comes back with the visible front face along world +Z. \
+    `orientation` is the additional rotation needed to point the \
+    object's "front" the right way in the world. Right-handed about +Y: \
+    `0` keeps the front facing +Z (the viewer); `90` rotates the front \
+    to face -X; `180` (or `-180`) faces -Z (away); `-90` faces +X. \
     Examples: a sofa whose seat opens toward the room centre needs \
     orientation set so its front (the seat side) faces the room's \
     interior, not the wall. A door in a wall on the +X face of a room \
-    needs orientation ≈ -π/2 so the door faces +X. The bbox stays an \
+    needs orientation `-90` so the door faces +X. The bbox stays an \
     AABB regardless — orientation only rotates the mesh inside it, so \
     a long object's bbox dimensions must match its long axis AFTER \
-    rotation. Omit (or set 0.0) for symmetric objects with no preferred \
+    rotation. Omit (or set 0) for symmetric objects with no preferred \
     facing (boulders, balls, columns, generic terrain).
   * `relationships` — how this object is anchored spatially. EVERY object \
     is REQUIRED to include at least one relationship whose `target` is \
@@ -921,7 +924,7 @@ def render_object_decomp(
     zone_prompt: str,
     zone_bbox: BoundingBox,
     scenario: Literal["anchor", "encapsulating", "negative-space"],
-    scene: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, float]],
+    scene: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, int]],
     prior_attempts: list[tuple[list[ObjectSpec], str]] | None = None,
 ) -> str:
     mode = {
@@ -933,7 +936,7 @@ def render_object_decomp(
         "\n".join(
             f"  - {nid}: prompt={prompt!r} bbox={bbox.model_dump_json()} "
             f"proxy_shape={_render_proxy_shape(proxy)} "
-            f"orientation={orient:.3f}rad parent={pid!r}"
+            f"orientation={orient}deg parent={pid!r}"
             for nid, prompt, bbox, pid, proxy, orient in scene
         )
         if scene
@@ -1062,13 +1065,13 @@ def render_object_bbox_batch(
     zone_prompt: str,
     zone_bbox: BoundingBox,
     objects: list[ObjectSpec],
-    peers: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, float]],
+    peers: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, int]],
 ) -> str:
     peer_lines = (
         "\n".join(
             f"  - {pid}: prompt={pprompt!r} bbox={pbbox.model_dump_json()} "
             f"proxy_shape={_render_proxy_shape(pproxy)} "
-            f"orientation={porient:.3f}rad parent={pparent!r}"
+            f"orientation={porient}deg parent={pparent!r}"
             for pid, pprompt, pbbox, pparent, pproxy, porient in peers
         )
         if peers
@@ -1079,7 +1082,7 @@ def render_object_bbox_batch(
         f"    prompt: {o.prompt}\n"
         f"    parent: {o.parent!r}\n"
         f"    proxy_shape: {_render_proxy_shape(o.proxy_shape)}\n"
-        f"    orientation: {o.orientation:.3f}rad\n"
+        f"    orientation: {o.orientation}deg\n"
         f"    relationships:\n"
         + (
             "\n".join(
@@ -1138,14 +1141,14 @@ legibility or character. Same rules as the bulk decomposition step:
   * `parent` — either this zone's id, or the id of ANY already-placed \
     node in the scene (typically an object already placed in THIS \
     zone, like a cup on a previously-placed desk).
-  * `orientation` — REQUIRED FLOAT (radians, default 0.0). World-frame \
-    yaw about +Y. The mesh comes back from the image-to-3D model with \
-    its visible front along world +Z; orientation rotates it into the \
-    pose you intend. `0.0` = front faces +Z (toward viewer), `π/2` = \
-    front faces -X, `π` = front faces -Z (away), `-π/2` = front faces \
-    +X. Pick a non-zero value when the object has a clear "front" that \
-    should face a specific direction in the scene; leave 0.0 for \
-    symmetric objects.
+  * `orientation` — REQUIRED INTEGER DEGREES in [-180, 180] (default 0). \
+    World-frame yaw about +Y. The mesh comes back from the image-to-3D \
+    model with its visible front along world +Z; orientation rotates \
+    it into the pose you intend. `0` = front faces +Z (toward viewer), \
+    `90` = front faces -X, `180` = front faces -Z (away), `-90` = \
+    front faces +X. Pick a non-zero value when the object has a clear \
+    "front" that should face a specific direction in the scene; leave \
+    0 for symmetric objects.
   * `relationships` — REQUIRED to include at least one relationship \
     whose `target` is EXACTLY EQUAL to this emitted object's `parent` \
     field. This is the primary anchor, it is NOT optional, and any \
@@ -1303,14 +1306,14 @@ def render_next_object(
     zone_id: str,
     zone_prompt: str,
     zone_bbox: BoundingBox,
-    scene: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, float]],
+    scene: list[tuple[str, str, BoundingBox, str | None, ProxyShape | None, int]],
     prior_attempts: list[tuple[ObjectSpec, str]] | None = None,
 ) -> str:
     scene_lines = (
         "\n".join(
             f"  - {nid}: prompt={prompt!r} bbox={bbox.model_dump_json()} "
             f"proxy_shape={_render_proxy_shape(proxy)} "
-            f"orientation={orient:.3f}rad parent={pid!r}"
+            f"orientation={orient}deg parent={pid!r}"
             for nid, prompt, bbox, pid, proxy, orient in scene
         )
         if scene

@@ -92,8 +92,8 @@
                 opacity: 0.5;
                 cursor: default;
             }
-            #bbox-toggle {
-                margin-left: auto;
+            #bbox-toggle,
+            #frames-toggle {
                 padding: 5px 10px;
                 border-radius: 4px;
                 border: 1px solid #2a2d35;
@@ -104,14 +104,16 @@
                 cursor: pointer;
                 white-space: nowrap;
             }
-            #bbox-toggle + #slot-reset {
-                margin-left: 0;
+            #bbox-toggle {
+                margin-left: auto;
             }
-            #bbox-toggle:hover {
+            #bbox-toggle:hover,
+            #frames-toggle:hover {
                 border-color: #4a8fd8;
                 color: #e6e6e6;
             }
-            #bbox-toggle.off {
+            #bbox-toggle.off,
+            #frames-toggle.off {
                 background: #2a2d35;
                 color: #5a5e68;
             }
@@ -484,6 +486,7 @@
         <div id="canvas-host"></div>
         <div id="slots">
             <button id="bbox-toggle" type="button" title="Show or hide bounding-box wireframes (meshes-only view)">bboxes: on</button>
+            <button id="frames-toggle" type="button" title="Show or hide frame meshes (walls/floors/ceilings) so you can see scene interiors">frames: on</button>
             <button id="slot-reset" type="button" title="Wipe this slot and start a fresh run">reset</button>
         </div>
         <div id="status"><p class="line hdr">ready</p></div>

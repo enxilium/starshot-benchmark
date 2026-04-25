@@ -8,12 +8,14 @@ const SERVER_URL = document
 
 const SLOT_STORAGE_KEY = "starshot.selectedSlot";
 const BBOX_VISIBLE_STORAGE_KEY = "starshot.bboxesVisible";
+const FRAMES_VISIBLE_STORAGE_KEY = "starshot.framesVisible";
 
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
 const slotsEl = document.getElementById("slots");
 const resetEl = document.getElementById("slot-reset");
 const bboxToggleEl = document.getElementById("bbox-toggle");
+const framesToggleEl = document.getElementById("frames-toggle");
 const assetsEl = document.getElementById("assets");
 const assetsBodyEl = document.getElementById("assets-body");
 const assetsCountEl = document.getElementById("assets-count");
@@ -363,6 +365,19 @@ bboxToggleEl.addEventListener("click", () => {
   applyBboxToggleLabel();
   refreshAllBboxVisibility();
 });
+
+let framesShown = localStorage.getItem(FRAMES_VISIBLE_STORAGE_KEY) !== "0";
+function applyFramesToggleLabel() {
+  framesToggleEl.textContent = `frames: ${framesShown ? "on" : "off"}`;
+  framesToggleEl.classList.toggle("off", !framesShown);
+}
+applyFramesToggleLabel();
+framesToggleEl.addEventListener("click", () => {
+  framesShown = !framesShown;
+  localStorage.setItem(FRAMES_VISIBLE_STORAGE_KEY, framesShown ? "1" : "0");
+  applyFramesToggleLabel();
+  refreshAllFrameModelVisibility();
+});
 const bboxes = new Map(); // id -> THREE.Box3Helper
 const proxies = new Map(); // id -> THREE.Mesh (wireframe proxy silhouette)
 const modelsById = new Map(); // id -> THREE.Object3D (the loaded gltf.scene)
@@ -683,6 +698,7 @@ async function _loadModelNow(event, gen) {
     }
     sceneRoot.add(gltf.scene);
     modelsById.set(event.id, gltf.scene);
+    applyModelVisibility(event.id);
     fitToScene();
     upsertAsset(event.id, { status: "loaded" });
   } catch (e) {
@@ -818,6 +834,17 @@ function applyBboxVisibility(id) {
 
 function refreshAllBboxVisibility() {
   for (const id of bboxes.keys()) applyBboxVisibility(id);
+}
+
+function applyModelVisibility(id) {
+  const model = modelsById.get(id);
+  if (!model) return;
+  const isFrame = treeNodes.get(id)?.kind === "frame";
+  model.visible = isFrame ? framesShown : true;
+}
+
+function refreshAllFrameModelVisibility() {
+  for (const id of modelsById.keys()) applyModelVisibility(id);
 }
 
 function setHoveredBbox(id) {
