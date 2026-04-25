@@ -96,9 +96,10 @@ async def call_llm[T: BaseModel](
 
 def _normalize_schema(schema: object) -> object:
     """Recursively normalize the Pydantic-emitted schema for providers that
-    reject draft-2020-12 features. Two transforms:
+    reject draft-2020-12 features. Transforms:
 
-      * Drop `minItems`/`maxItems` — Anthropic rejects them on `array`.
+      * Drop `minItems`/`maxItems`/`minimum`/`maximum`/`default` —
+        Anthropic rejects them on `array` / `integer` / etc.
       * Collapse `prefixItems` (Pydantic emits this for fixed-length
         tuples like `tuple[float, float, float]`) into a single `items`
         schema. Anthropic rejects `prefixItems` outright. We assume
@@ -110,7 +111,7 @@ def _normalize_schema(schema: object) -> object:
     if isinstance(schema, dict):
         out = {}
         for k, v in schema.items():
-            if k in {"minItems", "maxItems"}:
+            if k in {"minItems", "maxItems", "minimum", "maximum", "default"}:
                 continue
             if k == "prefixItems":
                 if isinstance(v, list) and v and "items" not in schema:

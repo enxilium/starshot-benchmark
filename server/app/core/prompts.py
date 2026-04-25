@@ -871,6 +871,9 @@ For each object, emit:
     floors, ceilings, fences) and any object whose bbox is already a \
     good silhouette.
   * `orientation` — REQUIRED INTEGER DEGREES in [-180, 180] (default 0). \
+    MUST be a small whole number like `0`, `90`, `-90`, `180`, `45`. \
+    DO NOT emit a float, scientific notation, fractional value, or any \
+    number outside [-180, 180]; values outside this range are rejected. \
     World-frame yaw about +Y for the generated mesh. The image-to-3D \
     model receives an ORTHOGRAPHIC FRONT VIEW of the object, so its \
     mesh comes back with the visible front face along world +Z. \
@@ -1142,6 +1145,9 @@ legibility or character. Same rules as the bulk decomposition step:
     node in the scene (typically an object already placed in THIS \
     zone, like a cup on a previously-placed desk).
   * `orientation` — REQUIRED INTEGER DEGREES in [-180, 180] (default 0). \
+    MUST be a small whole number like `0`, `90`, `-90`, `180`, `45`. \
+    DO NOT emit a float, scientific notation, fractional value, or any \
+    number outside [-180, 180]; values outside this range are rejected. \
     World-frame yaw about +Y. The mesh comes back from the image-to-3D \
     model with its visible front along world +Z; orientation rotates \
     it into the pose you intend. `0` = front faces +Z (toward viewer), \
