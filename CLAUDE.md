@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project purpose
 
-`starshot-benchmark` is an orchestrator for a **text-to-3D scene pipeline**. A user prompt like "A beautiful modern mansion" or "A swamp with islands" is recursively decomposed by LLMs into subzones and objects, each generated as a 3D mesh via **Hunyuan 3.1**, then composed into a single `.glb` file.
+`starshot-benchmark` is an orchestrator for a **text-to-3D scene pipeline**. A user prompt like "A beautiful modern mansion" or "A swamp with islands" is recursively decomposed by LLMs into subzones and objects, each generated as a 3D mesh via **Trellis 2**, then composed into a single `.glb` file.
 
 The broader goal is to **benchmark LLM spatial reasoning** — the dashboard lets you swap the LLM used at every reasoning step in the pipeline and compare outputs.
 
@@ -65,31 +65,32 @@ Entry: `(prompt, model, run_id, runs_dir)`. Exit: a root `Node` with the full su
 
 1. **Receive user prompt.**
 2. **Overall bounding box (LLM).** Size the root bbox to the scene shape (tall+narrow skyscraper, long+flat river, etc.). Interpreted under the canonical front view above.
-3. **Children decomposition (LLM).** Given the current node's prompt and bbox, the LLM emits either `is_atomic=true` (stop recursing on this node) or a list of child specs. Each child spec has: `id`, `prompt`, and a list of `Relationship`s anchoring it to the parent or already-listed siblings. The LLM does **not** pick concrete coordinates here.
-4. **Topologically order children** by their sibling relationships so each is placed after every sibling it depends on. Cycles are an error.
-5. **Per child, in topo order:**
+3. **Zone planning (LLM).** One call authors three things together: (a) this zone's character/intent `plan`, (b) the `is_atomic` decision (does it subdivide?), and (c) when subdividing, a list of `SubzoneSeed`s — each with `id`, `prompt`, and a fully-authored child `plan`. The structural decision and the per-subzone plans live in the same call deliberately: parent intent and child identity are deeply linked. Non-root zones receive their seed's plan as `inherited_plan` and re-emit it (the seed plan is authoritative; this step's job for the child is to make the structural decision and seed _its_ children). If `is_atomic`, the zone hands off to phase-2 anchor generation.
+4. **Children materialization (LLM).** Runs only when step 3 said subdivides. Takes the subzone seeds and assigns each a `proxy_shape` (optional) and `Relationship`s anchoring it to the parent or earlier siblings. It does **not** re-decide atomicity, add/drop children, or rewrite plans — `id`/`prompt` are copied from the seeds verbatim. The LLM does **not** pick concrete coordinates here.
+5. **Topologically order children** by their sibling relationships so each is placed after every sibling it depends on. Cycles are an error.
+6. **Per child, in topo order:**
    1. **Bounding box resolution (LLM).** Given the parent bbox, sibling bboxes already placed, the child's prompt, and its relationships, the LLM produces the child's concrete AABB. Must lie inside the parent bbox, not overlap siblings, and respect each relationship's `kind` + `reference_point`.
    2. **Frame decider (LLM).** Decide whether this child needs architectural geometry (walls, floor, ceiling, roof, curved enclosure). If yes, produce frame specs. Frames are realized **deterministically**:
       - `plane` — flat rectangular surface.
       - `curve` — vertically-extruded Catmull-Rom spline; closed loops get floor + ceiling caps.
-      - `generated` — escape hatch: Hunyuan produces the shell mesh, we rescale it into the child's bbox.
+      - `generated` — escape hatch: Trellis 2 produces the shell mesh, we rescale it into the child's bbox.
 
       Each realized frame becomes a concrete child `Node` of the placed child, with `mesh_url` pointing at its `.glb`.
-6. **Recurse** into each placed child and go back to step 3. Atomic leaves stop recursing and (eventually) flow into phase 2.
+7. **Recurse** into each placed child and go back to step 3. Each child arrives with its `plan` pre-seeded from the parent's planning step. Atomic leaves stop recursing and (eventually) flow into phase 2.
 
 The root is never fed through the frame decider — frames belong to decomposed zones, not to the world-scale canvas.
 
 ### Phase 2 — Generation (stub)
 
-Not implemented. When implemented, it will take an atomic leaf `Node` and populate it / its children with Hunyuan meshes. Anchor-object resolution, relationship DAG validation, per-object bbox resolution, mesh generation, rescaling, state-driven completion loop, and assembly all belong here. Until phase 2 exists, atomic leaves just stay abstract in the tree.
+Not implemented. When implemented, it will take an atomic leaf `Node` and populate it / its children with Trellis 2 meshes. Anchor-object resolution, relationship DAG validation, per-object bbox resolution, mesh generation, rescaling, state-driven completion loop, and assembly all belong here. Until phase 2 exists, atomic leaves just stay abstract in the tree.
 
 ## Cross-cutting concerns
 
 - **Pluggable LLM selection.** Every LLM call site reads the model from a request-scoped value (currently passed as `model: str` through the pipeline). No hard-coded model IDs at call sites.
-- **Deterministic vs. LLM steps.** Frame realization (plane/curve meshing), mesh rescaling, and `.glb` assembly are deterministic. LLM calls are: overall bbox, children decomposition, bbox resolution, frame decider. Keep determinism free of LLM calls so benchmark results isolate LLM quality.
+- **Deterministic vs. LLM steps.** Frame realization (plane/curve meshing), mesh rescaling, and `.glb` assembly are deterministic. LLM calls are: overall bbox, zone planning, children materialization, bbox resolution, frame decider. Keep determinism free of LLM calls so benchmark results isolate LLM quality.
 - **Retry logging (when validators exist).** The current flow is optimistic — the LLM is trusted on bbox placement. If/when deterministic validators are added back, every retry must be logged; retry counts are a core benchmark signal. Don't preemptively add the validators.
 - **Recursion termination** is an LLM decision (step 3's `is_atomic`). No hard depth cap.
-- **Frames are not Hunyuan** (except the `generated` escape hatch). Plane and curve frames are baked from their specs.
+- **Frames are not Trellis** (except the `generated` escape hatch). Plane and curve frames are baked from their specs.
 
 ## Client ↔ server contract
 

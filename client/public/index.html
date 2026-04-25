@@ -1,128 +1,509 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="server-url" content="http://127.0.0.1:8765" />
-    <title>starshot-benchmark viewer</title>
-    <style>
-      html, body { margin: 0; height: 100%; background: #101114; color: #e6e6e6; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-      #canvas-host { position: fixed; inset: 0; }
-      #canvas-host canvas { display: block; }
-      #prompt-form {
-        position: fixed; top: 12px; left: 12px; right: 12px; max-width: 560px;
-        display: flex; gap: 8px; align-items: stretch;
-        padding: 8px; border-radius: 6px;
-        background: rgba(22, 24, 29, 0.82); backdrop-filter: blur(6px);
-      }
-      #prompt-input {
-        flex: 1; min-width: 0; resize: vertical; min-height: 36px; max-height: 160px;
-        padding: 8px 10px; border-radius: 4px; border: 1px solid #2a2d35;
-        background: #16181d; color: #e6e6e6;
-        font: inherit; font-size: 12px; line-height: 1.4;
-      }
-      #prompt-input:focus { outline: none; border-color: #4a8fd8; }
-      #prompt-submit {
-        padding: 0 14px; border-radius: 4px; border: 1px solid #2a2d35;
-        background: #2a4a78; color: #e6e6e6; font: inherit; font-size: 12px;
-        cursor: pointer; white-space: nowrap;
-      }
-      #prompt-submit:hover:not(:disabled) { background: #345a92; }
-      #prompt-submit:disabled { opacity: 0.5; cursor: default; }
-      #status {
-        position: fixed; top: 96px; left: 12px; right: 12px; max-width: 560px;
-        padding: 10px 12px; border-radius: 6px;
-        background: rgba(22, 24, 29, 0.78); backdrop-filter: blur(6px);
-        font-size: 12px; line-height: 1.4; pointer-events: none;
-      }
-      #status .line { margin: 0; white-space: pre-wrap; word-break: break-word; }
-      #status .line.err { color: #ff8080; }
-      #status .line.hdr { color: #9ad4ff; }
-      #log {
-        position: fixed; bottom: 12px; left: 12px; right: 12px; max-height: 28vh;
-        overflow: auto; padding: 8px 12px; border-radius: 6px;
-        background: rgba(22, 24, 29, 0.78); backdrop-filter: blur(6px);
-        font-size: 11px; line-height: 1.45; pointer-events: auto;
-      }
-      #log .line { margin: 0; white-space: pre-wrap; word-break: break-word; }
-      #log .step { color: #8bd17c; font-weight: 600; }
-      #log .kv { margin-left: 2px; }
-      #log .kv .k { color: #8a8f99; }
-      #assets {
-        position: fixed; top: 12px; right: 12px; width: 320px;
-        max-height: calc(100vh - 40vh); display: flex; flex-direction: column;
-        border-radius: 6px; background: rgba(22, 24, 29, 0.82);
-        backdrop-filter: blur(6px); font-size: 11px; line-height: 1.4;
-        z-index: 5;
-      }
-      #assets.collapsed #assets-body { display: none; }
-      #assets-header {
-        display: flex; align-items: center; justify-content: space-between;
-        padding: 6px 10px; border-bottom: 1px solid #2a2d35;
-        font-size: 11px; color: #9ad4ff; cursor: pointer; user-select: none;
-      }
-      #assets.collapsed #assets-header { border-bottom: none; }
-      #assets-count { color: #8a8f99; font-weight: normal; }
-      #assets-body { overflow-y: auto; padding: 6px; display: flex;
-        flex-direction: column; gap: 6px; }
-      .asset-card {
-        display: flex; gap: 8px; padding: 6px; border-radius: 4px;
-        background: #16181d; border: 1px solid #2a2d35;
-      }
-      .asset-card.status-loaded { border-color: #3a5a3a; }
-      .asset-card.status-error { border-color: #5a3a3a; }
-      .asset-thumb {
-        width: 80px; height: 80px; flex-shrink: 0; border-radius: 3px;
-        background: #0c0d10; object-fit: cover; cursor: pointer;
-      }
-      .asset-thumb.placeholder {
-        display: flex; align-items: center; justify-content: center;
-        color: #5a5e68; font-size: 10px;
-      }
-      .asset-body { flex: 1; min-width: 0; display: flex; flex-direction: column;
-        gap: 3px; }
-      .asset-id { color: #e0c271; font-weight: 600; word-break: break-all; }
-      .asset-status {
-        font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
-      }
-      .asset-status.pending { color: #8a8f99; }
-      .asset-status.loaded { color: #8bd17c; }
-      .asset-status.error { color: #ff8080; }
-      .asset-prompt {
-        color: #b8bcc4; white-space: pre-wrap;
-        display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-        overflow: hidden; cursor: pointer;
-      }
-      .asset-prompt.expanded { -webkit-line-clamp: unset; }
-    </style>
-    <script type="importmap">
-      {
-        "imports": {
-          "three": "/vendor/three/build/three.module.js",
-          "three/addons/": "/vendor/three/examples/jsm/"
-        }
-      }
-    </script>
-  </head>
-  <body>
-    <div id="canvas-host"></div>
-    <form id="prompt-form" autocomplete="off">
-      <textarea
-        id="prompt-input"
-        rows="2"
-        placeholder="Describe a scene…"
-      >A modern, fancy looking house.</textarea>
-      <button id="prompt-submit" type="submit">Run</button>
-    </form>
-    <div id="status"><p class="line hdr">ready</p></div>
-    <div id="assets">
-      <div id="assets-header">
-        <span>assets <span id="assets-count">(0)</span></span>
-        <span id="assets-toggle">▾</span>
-      </div>
-      <div id="assets-body"></div>
-    </div>
-    <div id="log"></div>
-    <script type="module" src="/viewer.js"></script>
-  </body>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="server-url" content="http://127.0.0.1:8765" />
+        <title>starshot-benchmark viewer</title>
+        <style>
+            html,
+            body {
+                margin: 0;
+                height: 100%;
+                background: #101114;
+                color: #e6e6e6;
+                font-family:
+                    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+                    monospace;
+            }
+            #canvas-host {
+                position: fixed;
+                inset: 0;
+            }
+            #canvas-host canvas {
+                display: block;
+            }
+            #slots {
+                position: fixed;
+                top: 12px;
+                left: 12px;
+                right: 12px;
+                max-width: 900px;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+                align-items: center;
+                padding: 6px 8px;
+                border-radius: 6px;
+                background: rgba(22, 24, 29, 0.82);
+                backdrop-filter: blur(6px);
+            }
+            .slot-tab {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 5px 9px;
+                border-radius: 4px;
+                border: 1px solid #2a2d35;
+                background: #16181d;
+                color: #b8bcc4;
+                font: inherit;
+                font-size: 11px;
+                cursor: pointer;
+                white-space: nowrap;
+            }
+            .slot-tab:hover {
+                border-color: #4a8fd8;
+            }
+            .slot-tab.active {
+                background: #2a4a78;
+                border-color: #4a8fd8;
+                color: #e6e6e6;
+            }
+            .slot-dot {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                flex-shrink: 0;
+                background: #5a5e68;
+            }
+            .slot-dot.status-running { background: #e0c271; }
+            .slot-dot.status-done    { background: #8bd17c; }
+            .slot-dot.status-error   { background: #ff8080; }
+            .slot-dot.status-idle    { background: #5a5e68; }
+            #slot-reset {
+                margin-left: auto;
+                padding: 5px 10px;
+                border-radius: 4px;
+                border: 1px solid #2a2d35;
+                background: #16181d;
+                color: #b8bcc4;
+                font: inherit;
+                font-size: 11px;
+                cursor: pointer;
+                white-space: nowrap;
+            }
+            #slot-reset:hover:not(:disabled) {
+                background: #3a2a2a;
+                border-color: #6a3a3a;
+                color: #e6e6e6;
+            }
+            #slot-reset:disabled {
+                opacity: 0.5;
+                cursor: default;
+            }
+            #bbox-toggle {
+                margin-left: auto;
+                padding: 5px 10px;
+                border-radius: 4px;
+                border: 1px solid #2a2d35;
+                background: #16181d;
+                color: #b8bcc4;
+                font: inherit;
+                font-size: 11px;
+                cursor: pointer;
+                white-space: nowrap;
+            }
+            #bbox-toggle + #slot-reset {
+                margin-left: 0;
+            }
+            #bbox-toggle:hover {
+                border-color: #4a8fd8;
+                color: #e6e6e6;
+            }
+            #bbox-toggle.off {
+                background: #2a2d35;
+                color: #5a5e68;
+            }
+            #status {
+                position: fixed;
+                top: 64px;
+                left: 12px;
+                right: 12px;
+                max-width: 560px;
+                padding: 10px 12px;
+                border-radius: 6px;
+                background: rgba(22, 24, 29, 0.78);
+                backdrop-filter: blur(6px);
+                font-size: 12px;
+                line-height: 1.4;
+                pointer-events: none;
+            }
+            #status .line {
+                margin: 0;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+            #status .line.err {
+                color: #ff8080;
+            }
+            #status .line.hdr {
+                color: #9ad4ff;
+            }
+            #log {
+                position: fixed;
+                bottom: 12px;
+                left: 12px;
+                right: 12px;
+                max-height: 28vh;
+                overflow: auto;
+                padding: 8px 12px;
+                border-radius: 6px;
+                background: rgba(22, 24, 29, 0.78);
+                backdrop-filter: blur(6px);
+                font-size: 11px;
+                line-height: 1.45;
+                pointer-events: auto;
+            }
+            #log .line {
+                margin: 0;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+            #log .line:hover {
+                background: rgba(255, 255, 255, 0.04);
+            }
+            #log .step {
+                color: #8bd17c;
+                font-weight: 600;
+            }
+            #log .kv {
+                margin-left: 2px;
+            }
+            #log .kv .k {
+                color: #8a8f99;
+            }
+            #log .idx {
+                color: #555a63;
+                margin-right: 6px;
+                font-variant-numeric: tabular-nums;
+            }
+            #log .rewind {
+                float: right;
+                margin-left: 8px;
+                padding: 0 4px;
+                border: 0;
+                background: transparent;
+                color: #8a8f99;
+                cursor: pointer;
+                font: inherit;
+                opacity: 0;
+                transition: opacity 80ms linear;
+            }
+            #log .line:hover .rewind {
+                opacity: 1;
+            }
+            #log .rewind:hover {
+                color: #e0c271;
+            }
+            #assets {
+                position: fixed;
+                top: 12px;
+                right: 12px;
+                width: 320px;
+                max-height: calc(100vh - 40vh);
+                display: flex;
+                flex-direction: column;
+                border-radius: 6px;
+                background: rgba(22, 24, 29, 0.82);
+                backdrop-filter: blur(6px);
+                font-size: 11px;
+                line-height: 1.4;
+                z-index: 5;
+            }
+            #tree {
+                position: fixed;
+                top: 160px;
+                left: 12px;
+                width: 360px;
+                max-height: calc(100vh - 180px - 30vh);
+                display: flex;
+                flex-direction: column;
+                border-radius: 6px;
+                background: rgba(22, 24, 29, 0.82);
+                backdrop-filter: blur(6px);
+                font-size: 11px;
+                line-height: 1.4;
+                z-index: 5;
+            }
+            #tree.collapsed #tree-body {
+                display: none;
+            }
+            #tree-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 6px 10px;
+                border-bottom: 1px solid #2a2d35;
+                font-size: 11px;
+                color: #9ad4ff;
+                cursor: pointer;
+                user-select: none;
+            }
+            #tree.collapsed #tree-header {
+                border-bottom: none;
+            }
+            #tree-active {
+                color: #8a8f99;
+                font-weight: normal;
+                flex: 1;
+                text-align: right;
+                padding-right: 8px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #tree-body {
+                overflow: auto;
+                padding: 6px 4px 6px 6px;
+            }
+            .tree-node {
+                display: block;
+                margin: 1px 0;
+                padding: 2px 4px;
+                border-left: 2px solid transparent;
+                border-radius: 2px;
+                cursor: pointer;
+            }
+            .tree-node.active {
+                background: rgba(74, 143, 216, 0.18);
+                border-left-color: #4a8fd8;
+            }
+            .tree-node.selected {
+                background: rgba(74, 240, 224, 0.22);
+                border-left-color: #4af0e0;
+            }
+            .tree-node.selected.active {
+                background: rgba(74, 240, 224, 0.28);
+            }
+            .tree-row {
+                display: flex;
+                align-items: baseline;
+                gap: 6px;
+            }
+            .tree-id {
+                color: #e0c271;
+                font-weight: 600;
+                flex-shrink: 0;
+            }
+            .tree-id.object {
+                color: #c586d1;
+            }
+            .tree-prompt {
+                color: #b8bcc4;
+                flex: 1;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .tree-phase {
+                flex-shrink: 0;
+                font-size: 10px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                padding: 0 4px;
+                border-radius: 2px;
+                background: #16181d;
+                border: 1px solid #2a2d35;
+            }
+            .phase-planning {
+                color: #9ad4ff;
+                border-color: #2a4a6e;
+            }
+            .phase-decomposing {
+                color: #e0c271;
+                border-color: #6e5a2a;
+            }
+            .phase-resolving_bbox {
+                color: #f6a96a;
+                border-color: #6e4a2a;
+            }
+            .phase-generating_frame {
+                color: #c586d1;
+                border-color: #5a2a6e;
+            }
+            .phase-generating_anchor {
+                color: #8bd17c;
+                border-color: #2a5a2a;
+            }
+            .phase-generating_mesh {
+                color: #6ac2c2;
+                border-color: #2a5a5a;
+            }
+            .phase-done {
+                color: #5a8a55;
+                border-color: #2a3a2a;
+            }
+            .phase-pending {
+                color: #5a5e68;
+                border-color: #2a2d35;
+            }
+            .tree-children {
+                padding-left: 12px;
+                border-left: 1px dashed #2a2d35;
+                margin-left: 4px;
+            }
+            #assets.collapsed #assets-body {
+                display: none;
+            }
+            #assets-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 6px 10px;
+                border-bottom: 1px solid #2a2d35;
+                font-size: 11px;
+                color: #9ad4ff;
+                cursor: pointer;
+                user-select: none;
+            }
+            #assets.collapsed #assets-header {
+                border-bottom: none;
+            }
+            #assets-count {
+                color: #8a8f99;
+                font-weight: normal;
+            }
+            #assets-body {
+                overflow-y: auto;
+                padding: 6px;
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+            }
+            .asset-card {
+                display: flex;
+                gap: 8px;
+                padding: 6px;
+                border-radius: 4px;
+                background: #16181d;
+                border: 1px solid #2a2d35;
+            }
+            .asset-card.status-loaded {
+                border-color: #3a5a3a;
+            }
+            .asset-card.status-error {
+                border-color: #5a3a3a;
+            }
+            .asset-thumb {
+                width: 80px;
+                height: 80px;
+                flex-shrink: 0;
+                border-radius: 3px;
+                background: #0c0d10;
+                object-fit: cover;
+                cursor: pointer;
+            }
+            .asset-thumb.placeholder {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: #5a5e68;
+                font-size: 10px;
+            }
+            .asset-body {
+                flex: 1;
+                min-width: 0;
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+            }
+            .asset-id {
+                color: #e0c271;
+                font-weight: 600;
+                word-break: break-all;
+            }
+            .asset-status {
+                font-size: 10px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+            }
+            .asset-status.pending {
+                color: #8a8f99;
+            }
+            .asset-status.loaded {
+                color: #8bd17c;
+            }
+            .asset-status.error {
+                color: #ff8080;
+            }
+            .asset-prompt {
+                color: #b8bcc4;
+                white-space: pre-wrap;
+                display: -webkit-box;
+                -webkit-line-clamp: 3;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+                cursor: pointer;
+            }
+            .asset-prompt.expanded {
+                -webkit-line-clamp: unset;
+            }
+            #zoom-controls {
+                position: fixed;
+                right: 12px;
+                bottom: calc(28vh + 24px);
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                z-index: 6;
+            }
+            #zoom-controls button {
+                width: 32px;
+                height: 32px;
+                padding: 0;
+                border-radius: 4px;
+                border: 1px solid #2a2d35;
+                background: rgba(22, 24, 29, 0.82);
+                backdrop-filter: blur(6px);
+                color: #b8bcc4;
+                font: inherit;
+                font-size: 18px;
+                line-height: 1;
+                cursor: pointer;
+            }
+            #zoom-controls button:hover {
+                border-color: #4a8fd8;
+                color: #e6e6e6;
+            }
+        </style>
+        <script type="importmap">
+            {
+                "imports": {
+                    "three": "/vendor/three/build/three.module.js",
+                    "three/addons/": "/vendor/three/examples/jsm/"
+                }
+            }
+        </script>
+    </head>
+    <body>
+        <div id="canvas-host"></div>
+        <div id="slots">
+            <button id="bbox-toggle" type="button" title="Show or hide bounding-box wireframes (meshes-only view)">bboxes: on</button>
+            <button id="slot-reset" type="button" title="Wipe this slot and start a fresh run">reset</button>
+        </div>
+        <div id="status"><p class="line hdr">ready</p></div>
+        <div id="tree">
+            <div id="tree-header">
+                <span>tree</span>
+                <span id="tree-active"></span>
+                <span id="tree-toggle">▾</span>
+            </div>
+            <div id="tree-body"></div>
+        </div>
+        <div id="assets">
+            <div id="assets-header">
+                <span>assets <span id="assets-count">(0)</span></span>
+                <span id="assets-toggle">▾</span>
+            </div>
+            <div id="assets-body"></div>
+        </div>
+        <div id="log"></div>
+        <div id="zoom-controls">
+            <button id="zoom-in" type="button" title="Zoom in (R)">+</button>
+            <button id="zoom-out" type="button" title="Zoom out (F)">−</button>
+        </div>
+        <script type="module" src="/viewer.js"></script>
+    </body>
 </html>

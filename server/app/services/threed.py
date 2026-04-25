@@ -1,7 +1,7 @@
-"""Two-stage asset generation: text -> image (Nano Banana Pro) -> 3D (Hunyuan 3.1).
+"""Two-stage asset generation: text -> image (Nano Banana Pro) -> 3D (Trellis 2).
 
 Text-to-3D alone produces unreliable geometry for thin architectural shells
-(walls, ceilings, floors). Going through an image model first gives Hunyuan
+(walls, ceilings, floors). Going through an image model first gives Trellis
 a concrete visual reference with correct proportions, which is much more
 robust.
 
@@ -19,12 +19,10 @@ from typing import Any
 import fal_client
 import httpx
 
-from app.utils import logging
+from app.utils import cache, logging
 
 NANO_BANANA_MODEL = os.environ.get("NANO_BANANA_MODEL", "fal-ai/nano-banana-pro")
-HUNYUAN_MODEL = os.environ.get(
-    "HUNYUAN_MODEL", "fal-ai/hunyuan-3d/v3.1/pro/image-to-3d"
-)
+TRELLIS_MODEL = os.environ.get("TRELLIS_MODEL", "fal-ai/trellis-2")
 MAX_ATTEMPTS = 3
 # Transient failures we retry on: fal-side HTTP / timeout errors AND the
 # httpx network-layer errors (RemoteProtocolError "stream closed",
@@ -86,6 +84,20 @@ async def generate_mesh(
 ) -> dict[str, Path]:
     """Run text -> image -> 3D. Saves the reference image alongside the
     GLB so the client asset browser can display it. Returns both paths."""
+    node_id = image_stem.name
+    hit = cache.find_artifact_cache_hit(logging.current_events(), node_id)
+    if hit is not None:
+        cached_raw = Path(hit["raw_glb_path"])
+        cached_image = Path(hit["image_path"])
+        if cached_raw.exists() and cached_image.exists():
+            logging.log(
+                "cache.artifact.hit",
+                node_id=node_id,
+                image_path=str(cached_image),
+                raw_glb_path=str(cached_raw),
+            )
+            return {"glb": cached_raw, "image": cached_image}
+
     img = await _submit_with_retry(
         NANO_BANANA_MODEL,
         {"prompt": prompt},
@@ -101,13 +113,24 @@ async def generate_mesh(
     logging.log("nano_banana.done", remote_url=remote_image_url, saved=str(image_path))
 
     mesh = await _submit_with_retry(
-        HUNYUAN_MODEL,
-        {"input_image_url": remote_image_url, "generate_type": "Normal"},
-        stage="hunyuan",
+        TRELLIS_MODEL,
+        {
+            "image_url": remote_image_url,
+            "remesh": False,
+            "resolution": 512,
+            "texture_size": 1024,
+        },
+        stage="trellis",
     )
     glb_url = mesh["model_glb"]["url"]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    content = await _download_with_retry(glb_url, stage="hunyuan")
+    content = await _download_with_retry(glb_url, stage="trellis")
     output_path.write_bytes(content)
+    logging.log(
+        "cache.artifact",
+        node_id=node_id,
+        image_path=str(image_path),
+        raw_glb_path=str(output_path),
+    )
     return {"glb": output_path, "image": image_path}

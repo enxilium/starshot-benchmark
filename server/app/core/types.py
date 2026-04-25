@@ -10,14 +10,12 @@ convention.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
 Vec3Tuple = tuple[float, float, float]
 
-_Cm = Annotated[float, Field(multiple_of=0.01)]
-Vec3Cm = tuple[_Cm, _Cm, _Cm]
+Vec3Cm = tuple[float, float, float]
 
 
 class Corner(StrEnum):
@@ -100,6 +98,17 @@ class RelationshipKind(StrEnum):
     ATTACHED = "ATTACHED"
 
 
+class ProxyShape(StrEnum):
+    """Optional collision-proxy primitive describing the mesh's silhouette
+    inside its AABB. `None` on a Node means the AABB itself is the proxy
+    (a rectangular prism). The proxy is always inscribed axis-aligned in
+    the AABB; its parameters are derived from the AABB's dimensions."""
+
+    SPHERE = "SPHERE"
+    CAPSULE = "CAPSULE"
+    HEMISPHERE = "HEMISPHERE"
+
+
 class Relationship(BaseModel):
     """Anchors a node's bbox to a target corner of another node's bbox."""
 
@@ -114,17 +123,21 @@ class Node(BaseModel):
     """Tree node for the scene.
 
     Zones and objects are both Nodes. Zones are abstract (mesh_url is None)
-    and carry a high-level `plan` that seeds their further decomposition.
-    Concrete nodes (objects) set mesh_url and have no plan. Each node stores
-    only its parent id; the full tree is recoverable via the run-scoped flat
-    registry, but the pipeline emits state to clients incrementally via SSE
-    events rather than by traversing the Node graph.
+    and carry a high-level `plan` (zone identity/character) plus, when the
+    zone is decomposed, a `subzone_plan` (structural sketch of how it splits)
+    that seed downstream steps. Concrete nodes (objects) set mesh_url and
+    have neither. Each node stores only its parent id; the full tree is
+    recoverable via the run-scoped flat registry, but the pipeline emits
+    state to clients incrementally via SSE events rather than by traversing
+    the Node graph.
     """
 
     id: str
     prompt: str
     bbox: BoundingBox
+    proxy_shape: ProxyShape | None = None
     relationships: list[Relationship] = Field(default_factory=list)
     mesh_url: str | None = None
     parent_id: str | None = None
     plan: str | None = None
+    subzone_plan: str | None = None

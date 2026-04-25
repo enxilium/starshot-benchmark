@@ -6,18 +6,24 @@ const SERVER_URL = document
   .querySelector('meta[name="server-url"]')
   .getAttribute("content");
 
-const MODEL = "anthropic/claude-opus-4.7";
+const SLOT_STORAGE_KEY = "starshot.selectedSlot";
+const BBOX_VISIBLE_STORAGE_KEY = "starshot.bboxesVisible";
 
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
-const formEl = document.getElementById("prompt-form");
-const inputEl = document.getElementById("prompt-input");
-const submitEl = document.getElementById("prompt-submit");
+const slotsEl = document.getElementById("slots");
+const resetEl = document.getElementById("slot-reset");
+const bboxToggleEl = document.getElementById("bbox-toggle");
 const assetsEl = document.getElementById("assets");
 const assetsBodyEl = document.getElementById("assets-body");
 const assetsCountEl = document.getElementById("assets-count");
 const assetsHeaderEl = document.getElementById("assets-header");
 const assetsToggleEl = document.getElementById("assets-toggle");
+const treeEl = document.getElementById("tree");
+const treeBodyEl = document.getElementById("tree-body");
+const treeHeaderEl = document.getElementById("tree-header");
+const treeToggleEl = document.getElementById("tree-toggle");
+const treeActiveEl = document.getElementById("tree-active");
 
 // --- log panel --------------------------------------------------------------
 
@@ -28,6 +34,9 @@ const KIND_COLOR = {
   "bbox": "#e0c271",
   "image": "#f6a96a",
   "model": "#c586d1",
+  "step": "#4a8fd8",
+  "divider.decompose": "#e0c271",
+  "generation.decompose": "#c586d1",
 };
 
 function setStatus(text, cls = "hdr") {
@@ -48,9 +57,30 @@ function fmtValue(v) {
 }
 
 function appendEvent(event) {
-  const { kind, ...fields } = event;
+  const { kind, index, ...fields } = event;
   const p = document.createElement("p");
   p.className = "line";
+  if (typeof index === "number") p.dataset.eventIndex = String(index);
+
+  if (typeof index === "number") {
+    const btn = document.createElement("button");
+    btn.className = "rewind";
+    btn.type = "button";
+    btn.textContent = "↶ rewind";
+    btn.title = `Rewind to event ${index} (discards this event and everything after)`;
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      rewindTo(index);
+    });
+    p.appendChild(btn);
+  }
+
+  if (typeof index === "number") {
+    const idx = document.createElement("span");
+    idx.className = "idx";
+    idx.textContent = `#${index}`;
+    p.appendChild(idx);
+  }
 
   const tag = document.createElement("span");
   tag.className = "step";
@@ -163,6 +193,147 @@ assetsHeaderEl.addEventListener("click", () => {
   assetsToggleEl.textContent = collapsed ? "▸" : "▾";
 });
 
+// --- tree view --------------------------------------------------------------
+
+// Mirror of the server-side recursion. Nodes are upserted by `bbox` (when
+// placed) or by `divider.decompose` (announces children before their bboxes
+// are resolved, so the tree shows pending placeholders). The `step` event
+// drives the per-node phase badge and the global "active" highlight.
+const treeNodes = new Map(); // id -> { id, parentId, prompt, kind, phase, order }
+const treeChildren = new Map(); // parentId -> [childIds] in insertion order
+let treeRootId = null;
+let treeActiveId = null;
+let treeOrderCounter = 0;
+
+function treeUpsert(id, patch) {
+  const cur = treeNodes.get(id);
+  if (!cur) {
+    treeNodes.set(id, {
+      id, parentId: null, prompt: null, kind: "zone",
+      phase: "pending", order: treeOrderCounter++,
+      ...patch,
+    });
+    const parentId = patch.parentId ?? null;
+    if (parentId !== null) {
+      const arr = treeChildren.get(parentId) ?? [];
+      if (!arr.includes(id)) arr.push(id);
+      treeChildren.set(parentId, arr);
+    } else if (treeRootId === null) {
+      treeRootId = id;
+    }
+    return;
+  }
+  // Existing node: merge patch, but if parentId changes from null to a real
+  // one, wire it into the children index lazily.
+  const prevParent = cur.parentId;
+  Object.assign(cur, patch);
+  if (prevParent === null && cur.parentId) {
+    const arr = treeChildren.get(cur.parentId) ?? [];
+    if (!arr.includes(id)) arr.push(id);
+    treeChildren.set(cur.parentId, arr);
+    if (treeRootId === id) treeRootId = null; // was mis-rooted
+  }
+}
+
+function treeSetPhase(id, phase) {
+  const cur = treeNodes.get(id);
+  if (!cur) {
+    // Step fired before any bbox / decompose — stash the phase so it renders
+    // as soon as we have the node.
+    treeUpsert(id, { phase });
+  } else {
+    cur.phase = phase;
+  }
+  if (phase !== "done") {
+    treeActiveId = id;
+  } else if (treeActiveId === id) {
+    // A node finishing doesn't move the focus elsewhere on its own; leave
+    // the highlight on it until the next step event moves it.
+  }
+  renderTree();
+}
+
+function treeClear() {
+  treeNodes.clear();
+  treeChildren.clear();
+  treeRootId = null;
+  treeActiveId = null;
+  treeOrderCounter = 0;
+  treeBodyEl.innerHTML = "";
+  treeActiveEl.textContent = "";
+}
+
+function truncate(s, n = 60) {
+  if (!s) return "";
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function renderTreeNode(id) {
+  const node = treeNodes.get(id);
+  if (!node) return null;
+  const wrap = document.createElement("div");
+  const classes = ["tree-node"];
+  if (id === treeActiveId) classes.push("active");
+  if (id === selectedBboxId) classes.push("selected");
+  wrap.className = classes.join(" ");
+  wrap.dataset.id = id;
+
+  const row = document.createElement("div");
+  row.className = "tree-row";
+  // Click the row (not a nested child-tree row) to select this node.
+  row.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    selectTreeNode(id);
+  });
+
+  const idEl = document.createElement("span");
+  idEl.className = `tree-id ${node.kind}`;
+  idEl.textContent = node.id;
+  row.appendChild(idEl);
+
+  const promptEl = document.createElement("span");
+  promptEl.className = "tree-prompt";
+  promptEl.textContent = truncate(node.prompt, 80);
+  promptEl.title = node.prompt ?? "";
+  row.appendChild(promptEl);
+
+  const phaseEl = document.createElement("span");
+  phaseEl.className = `tree-phase phase-${node.phase}`;
+  phaseEl.textContent = node.phase;
+  row.appendChild(phaseEl);
+
+  wrap.appendChild(row);
+
+  const childIds = treeChildren.get(id) ?? [];
+  if (childIds.length > 0) {
+    const kidsEl = document.createElement("div");
+    kidsEl.className = "tree-children";
+    for (const cid of childIds) {
+      const cEl = renderTreeNode(cid);
+      if (cEl) kidsEl.appendChild(cEl);
+    }
+    wrap.appendChild(kidsEl);
+  }
+  return wrap;
+}
+
+function renderTree() {
+  treeBodyEl.innerHTML = "";
+  if (treeRootId !== null) {
+    const el = renderTreeNode(treeRootId);
+    if (el) treeBodyEl.appendChild(el);
+  }
+  if (treeActiveId !== null) {
+    const n = treeNodes.get(treeActiveId);
+    if (n) treeActiveEl.textContent = `${n.phase} · ${n.id}`;
+  }
+}
+
+treeHeaderEl.addEventListener("click", () => {
+  const collapsed = treeEl.classList.toggle("collapsed");
+  treeToggleEl.textContent = collapsed ? "▸" : "▾";
+});
+
 // --- three.js scene ---------------------------------------------------------
 
 const host = document.getElementById("canvas-host");
@@ -180,11 +351,27 @@ scene.add(sceneRoot);
 // and so clearScene can nuke them independently.
 const bboxRoot = new THREE.Group();
 scene.add(bboxRoot);
+bboxRoot.visible = localStorage.getItem(BBOX_VISIBLE_STORAGE_KEY) !== "0";
+function applyBboxToggleLabel() {
+  bboxToggleEl.textContent = `bboxes: ${bboxRoot.visible ? "on" : "off"}`;
+  bboxToggleEl.classList.toggle("off", !bboxRoot.visible);
+}
+applyBboxToggleLabel();
+bboxToggleEl.addEventListener("click", () => {
+  bboxRoot.visible = !bboxRoot.visible;
+  localStorage.setItem(BBOX_VISIBLE_STORAGE_KEY, bboxRoot.visible ? "1" : "0");
+  applyBboxToggleLabel();
+});
 const bboxes = new Map(); // id -> THREE.Box3Helper
+const proxies = new Map(); // id -> THREE.Mesh (wireframe proxy silhouette)
 let hoveredBboxId = null;
 
 const BBOX_COLOR_DEFAULT = 0xff3b3b;
+const BBOX_COLOR_OBJECT = 0x6bd96e;
+const BBOX_COLOR_PROXY = 0xb46aff;
 const BBOX_COLOR_HOVER = 0xffe14a;
+const BBOX_COLOR_SELECTED = 0x4af0e0;
+let selectedBboxId = null;
 
 const tooltip = document.createElement("div");
 tooltip.id = "bbox-tooltip";
@@ -229,7 +416,7 @@ controls.addEventListener("start", () => {
 // target together so OrbitControls' pivot follows the camera.
 const pressedKeys = new Set();
 let _lastMoveT = performance.now();
-const _MOVE_KEYS = new Set(["w", "a", "s", "d", "q", "e"]);
+const _MOVE_KEYS = new Set(["w", "a", "s", "d", "q", "e", "r", "f"]);
 
 function _isTypingTarget(t) {
   return t instanceof HTMLElement &&
@@ -261,7 +448,8 @@ const _move = new THREE.Vector3();
 
 function _applyKeyboardMove(dt) {
   if (pressedKeys.size === 0) return;
-  const speed = 2 * (pressedKeys.has("shift") ? 3 : 1) * dt;
+  const shifted = pressedKeys.has("shift");
+  const speed = 2 * (shifted ? 3 : 1) * dt;
 
   _fwd.subVectors(controls.target, camera.position);
   _fwd.y = 0;
@@ -277,9 +465,34 @@ function _applyKeyboardMove(dt) {
   if (pressedKeys.has("e")) _move.addScaledVector(_worldUp, speed);
   if (pressedKeys.has("q")) _move.addScaledVector(_worldUp, -speed);
 
-  if (_move.lengthSq() === 0) return;
-  camera.position.add(_move);
-  controls.target.add(_move);
+  if (_move.lengthSq() !== 0) {
+    camera.position.add(_move);
+    controls.target.add(_move);
+    cameraUserMoved = true;
+  }
+
+  // Dolly toward / away from the orbit target. Held key = continuous zoom;
+  // ~1.5x per second baseline, 4x with shift.
+  if (pressedKeys.has("r") || pressedKeys.has("f")) {
+    const rate = shifted ? 4 : 1.5;
+    let factor = 1;
+    if (pressedKeys.has("r")) factor *= Math.pow(1 / rate, dt);
+    if (pressedKeys.has("f")) factor *= Math.pow(rate, dt);
+    _dolly(factor);
+  }
+}
+
+function _dolly(factor) {
+  // factor < 1 zooms in, factor > 1 zooms out. Implemented as scaling the
+  // camera->target distance so OrbitControls' pivot semantics stay intact.
+  const offset = camera.position.clone().sub(controls.target);
+  const dist = offset.length();
+  if (dist === 0) return;
+  const minDist = 0.05;
+  const maxDist = 4000;
+  const newDist = Math.max(minDist, Math.min(maxDist, dist * factor));
+  offset.multiplyScalar(newDist / dist);
+  camera.position.copy(controls.target).add(offset);
   cameraUserMoved = true;
 }
 
@@ -372,6 +585,7 @@ function animate() {
 animate();
 
 function clearScene() {
+  resetModelQueue();
   while (sceneRoot.children.length > 0) {
     const child = sceneRoot.children[0];
     sceneRoot.remove(child);
@@ -389,7 +603,14 @@ function clearScene() {
     helper.material?.dispose?.();
   }
   bboxes.clear();
+  for (const mesh of proxies.values()) {
+    bboxRoot.remove(mesh);
+    mesh.geometry?.dispose?.();
+    mesh.material?.dispose?.();
+  }
+  proxies.clear();
   hoveredBboxId = null;
+  selectedBboxId = null;
   tooltip.style.display = "none";
 }
 
@@ -417,11 +638,31 @@ function fitToScene() {
 
 const loader = new GLTFLoader();
 
-async function loadModel(event) {
+// Serial queue — snapshot replay on resume fires many `model` events at once,
+// and starting every GLTFLoader in parallel melts slower machines. Each call
+// chains onto the previous so only one GLB downloads / parses / uploads to
+// the GPU at a time. `sceneGen` invalidates loads still in flight when the
+// scene is reset (rewind / fresh snapshot on reconnect).
+let modelQueue = Promise.resolve();
+let sceneGen = 0;
+
+function resetModelQueue() {
+  sceneGen += 1;
+  modelQueue = Promise.resolve();
+}
+
+function loadModel(event) {
+  const gen = sceneGen;
+  modelQueue = modelQueue.then(() => _loadModelNow(event, gen));
+}
+
+async function _loadModelNow(event, gen) {
+  if (gen !== sceneGen) return;
   const absUrl = new URL(event.url, SERVER_URL).toString();
   upsertAsset(event.id, { modelUrl: event.url });
   try {
     const gltf = await loader.loadAsync(absUrl);
+    if (gen !== sceneGen) return;
     gltf.scene.traverse((child) => {
       if (child.isMesh && child.material) {
         const mats = Array.isArray(child.material) ? child.material : [child.material];
@@ -440,9 +681,12 @@ async function loadModel(event) {
 
 // --- bbox overlays ----------------------------------------------------------
 
-// `{ id, origin: [x,y,z], dimensions: [dx,dy,dz] }` — matches the Python
-// BoundingBox serialization. Signed and zero-valued dimensions are allowed
-// (walls/floors are flat).
+// `{ id, origin: [x,y,z], dimensions: [dx,dy,dz], proxy_shape?: ... }` —
+// matches the Python BoundingBox+Node serialization. Signed and
+// zero-valued dimensions are allowed (walls/floors are flat). If a proxy
+// shape is set, we draw its wireframe silhouette in addition to the AABB
+// wireframe so the user can see what the LLM and surface-snap are
+// actually reasoning about.
 function loadBbox(event) {
   const { id, origin, dimensions } = event;
   if (bboxes.has(id)) {
@@ -452,6 +696,13 @@ function loadBbox(event) {
     prev.material?.dispose?.();
     if (hoveredBboxId === id) hoveredBboxId = null;
   }
+  if (proxies.has(id)) {
+    const prev = proxies.get(id);
+    bboxRoot.remove(prev);
+    prev.geometry?.dispose?.();
+    prev.material?.dispose?.();
+    proxies.delete(id);
+  }
   const ox = origin[0], oy = origin[1], oz = origin[2];
   const fx = ox + dimensions[0], fy = oy + dimensions[1], fz = oz + dimensions[2];
   const box3 = new THREE.Box3(
@@ -460,8 +711,68 @@ function loadBbox(event) {
   );
   const helper = new THREE.Box3Helper(box3, BBOX_COLOR_DEFAULT);
   helper.userData.bboxId = id;
+  helper.userData.nodeKind = event.node_kind ?? "zone";
+  helper.userData.proxyShape = event.proxy_shape ?? null;
   bboxRoot.add(helper);
   bboxes.set(id, helper);
+
+  const proxyMesh = buildProxyWireframe(event.proxy_shape, origin, dimensions);
+  if (proxyMesh !== null) {
+    bboxRoot.add(proxyMesh);
+    proxies.set(id, proxyMesh);
+  }
+  // If this id is already selected (user clicked before bbox arrived, or a
+  // bbox is being replaced), reapply the selection color.
+  applyBboxColor(id);
+}
+
+function buildProxyWireframe(proxyShape, origin, dimensions) {
+  if (!proxyShape) return null;
+  const sx = Math.abs(dimensions[0]);
+  const sy = Math.abs(dimensions[1]);
+  const sz = Math.abs(dimensions[2]);
+  if (sx === 0 || sy === 0 || sz === 0) return null;
+  const cx = origin[0] + dimensions[0] / 2;
+  const cy = origin[1] + dimensions[1] / 2;
+  const cz = origin[2] + dimensions[2] / 2;
+  const yMin = Math.min(origin[1], origin[1] + dimensions[1]);
+
+  let geom;
+  let anchorY;
+  if (proxyShape === "SPHERE") {
+    // Ellipsoid inscribed in the AABB: unit sphere (diameter 1) scaled
+    // to each AABB extent.
+    geom = new THREE.SphereGeometry(0.5, 24, 16);
+    geom.scale(sx, sy, sz);
+    anchorY = cy;
+  } else if (proxyShape === "HEMISPHERE") {
+    // Top hemisphere with equatorial disk on the AABB's bottom face.
+    // thetaLength = PI/2 starting at the north pole gives the upper half.
+    geom = new THREE.SphereGeometry(
+      0.5, 24, 16,
+      0, Math.PI * 2,
+      0, Math.PI / 2,
+    );
+    // The unit hemisphere spans y in [0, 0.5]; scale y by (sy / 0.5) so
+    // the apex reaches +sy above the equator.
+    geom.scale(sx, sy * 2, sz);
+    anchorY = yMin;
+  } else if (proxyShape === "CAPSULE") {
+    const r = Math.min(sx, sz) / 2;
+    const cylHeight = Math.max(0, sy - 2 * r);
+    geom = new THREE.CapsuleGeometry(r, cylHeight, 8, 24);
+    anchorY = cy;
+  } else {
+    return null;
+  }
+
+  const mat = new THREE.MeshBasicMaterial({
+    color: BBOX_COLOR_DEFAULT, wireframe: true, transparent: true, opacity: 0.55,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.position.set(cx, anchorY, cz);
+  mesh.renderOrder = 1;
+  return mesh;
 }
 
 const raycaster = new THREE.Raycaster();
@@ -470,13 +781,62 @@ const raycaster = new THREE.Raycaster();
 raycaster.params.Line.threshold = 0.1;
 const pointer = new THREE.Vector2();
 
+function applyBboxColor(id) {
+  const helper = id !== null ? bboxes.get(id) : null;
+  if (!helper) return;
+  const base =
+    helper.userData.proxyShape ? BBOX_COLOR_PROXY
+    : helper.userData.nodeKind === "object" ? BBOX_COLOR_OBJECT
+    : BBOX_COLOR_DEFAULT;
+  const color =
+    id === selectedBboxId ? BBOX_COLOR_SELECTED
+    : id === hoveredBboxId ? BBOX_COLOR_HOVER
+    : base;
+  helper.material.color.setHex(color);
+  const proxy = proxies.get(id);
+  if (proxy) proxy.material.color.setHex(color);
+}
+
 function setHoveredBbox(id) {
   if (id === hoveredBboxId) return;
-  const prev = hoveredBboxId !== null ? bboxes.get(hoveredBboxId) : null;
-  if (prev) prev.material.color.setHex(BBOX_COLOR_DEFAULT);
+  const prev = hoveredBboxId;
   hoveredBboxId = id;
-  const next = id !== null ? bboxes.get(id) : null;
-  if (next) next.material.color.setHex(BBOX_COLOR_HOVER);
+  applyBboxColor(prev);
+  applyBboxColor(id);
+}
+
+// Fit the camera to a single Box3 — parameterised variant of fitToScene.
+// Used by tree-click selection.
+function frameBbox(box) {
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = Math.max(0.5 * Math.max(size.x, size.y, size.z), 0.5);
+  controls.target.copy(center);
+  const dist = radius / Math.tan((camera.fov * Math.PI) / 360);
+  const dirVec = new THREE.Vector3(1, 0.7, 1).normalize();
+  camera.position.copy(center).addScaledVector(dirVec, dist * 1.8);
+  camera.near = Math.max(0.01, radius / 100);
+  camera.far = Math.max(100, radius * 100);
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+function selectTreeNode(id) {
+  const prev = selectedBboxId;
+  // Toggle off if re-clicking the same node.
+  selectedBboxId = prev === id ? null : id;
+  if (prev !== null) applyBboxColor(prev);
+  if (selectedBboxId !== null) applyBboxColor(selectedBboxId);
+  renderTree();
+  if (selectedBboxId !== null) {
+    const helper = bboxes.get(selectedBboxId);
+    if (helper) {
+      // User took explicit camera control — stop auto-fit from later snapping
+      // the view back to the full scene when new meshes land.
+      cameraUserMoved = true;
+      frameBbox(helper.box);
+    }
+  }
 }
 
 function positionTooltip(clientX, clientY, text) {
@@ -513,6 +873,16 @@ renderer.domElement.addEventListener("pointerleave", () => {
 // --- event dispatch ---------------------------------------------------------
 
 function dispatch(event) {
+  // A snapshot replay always begins with the index-0 run.start event. If we
+  // already have log content, this is a fresh snapshot from a reconnect
+  // (server restart / EventSource auto-reconnect) — wipe stale state so the
+  // replay renders cleanly.
+  if (event.index === 0 && event.kind === "run.start" && logEl.children.length > 0) {
+    clearScene();
+    clearLog();
+    clearAssets();
+    treeClear();
+  }
   appendEvent(event);
   switch (event.kind) {
     case "run.start":
@@ -520,43 +890,95 @@ function dispatch(event) {
       break;
     case "run.done":
       setStatus("run complete");
-      finishRun();
+      refreshSlots();
       break;
     case "run.error":
       setStatus(`error: ${event.message}`, "err");
-      finishRun();
+      refreshSlots();
       break;
     case "bbox":
       loadBbox(event);
+      treeUpsert(event.id, {
+        parentId: event.parent_id ?? null,
+        prompt: event.prompt ?? null,
+        kind: event.node_kind ?? "zone",
+      });
+      renderTree();
+      break;
+    case "divider.decompose":
+      // Pre-declare children so the tree shows them (in pending state) before
+      // their bboxes resolve. `children` ships as [{id, prompt}, ...].
+      for (const c of event.children ?? []) {
+        treeUpsert(c.id, { parentId: event.node, prompt: c.prompt, kind: "zone" });
+      }
+      renderTree();
+      break;
+    case "step":
+      treeSetPhase(event.node, event.phase);
+      break;
+    case "mesh.submit":
+      // Object mesh generation kicked off — show it on the tree.
+      treeSetPhase(event.id, "generating_mesh");
       break;
     case "image":
       upsertAsset(event.id, { imageUrl: event.url, prompt: event.prompt });
       break;
     case "model":
       loadModel(event);
+      treeSetPhase(event.id, "done");
       break;
     // Everything else is already shown as a log line above.
   }
 }
 
-// --- run lifecycle ----------------------------------------------------------
+// --- slot picker + run lifecycle --------------------------------------------
+
+// All seven pipelines run in the background on the server. The client
+// chooses which one to view — switching closes the active SSE, clears the
+// scene, and reconnects to the selected slot's stream.
 
 let currentSource = null;
+let currentSlotId = null;
+let slotSummaries = [];  // latest /slots payload, for tab rendering
 
-function setRunning(isRunning) {
-  submitEl.disabled = isRunning;
-  submitEl.textContent = isRunning ? "Running…" : "Run";
-}
-
-function finishRun() {
-  if (currentSource) {
-    currentSource.close();
-    currentSource = null;
+function renderSlotTabs() {
+  // Wipe any existing .slot-tab children; keep the #slot-reset button.
+  for (const child of Array.from(slotsEl.querySelectorAll(".slot-tab"))) {
+    child.remove();
   }
-  setRunning(false);
+  for (const s of slotSummaries) {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "slot-tab" + (s.id === currentSlotId ? " active" : "");
+    tab.dataset.slotId = s.id;
+    tab.title = s.prompt ?? "";
+
+    const dot = document.createElement("span");
+    dot.className = `slot-dot status-${s.status ?? "idle"}`;
+    tab.appendChild(dot);
+
+    const label = document.createElement("span");
+    label.textContent = s.id;
+    tab.appendChild(label);
+
+    tab.addEventListener("click", () => switchSlot(s.id));
+    slotsEl.insertBefore(tab, resetEl);
+  }
 }
 
-async function startRun(prompt) {
+async function refreshSlots() {
+  try {
+    const res = await fetch(new URL("/slots", SERVER_URL));
+    if (!res.ok) return;
+    slotSummaries = await res.json();
+    renderSlotTabs();
+  } catch {
+    // Transient; next tick will retry.
+  }
+}
+
+function switchSlot(id) {
+  if (id === currentSlotId) return;
   if (currentSource) {
     currentSource.close();
     currentSource = null;
@@ -564,30 +986,49 @@ async function startRun(prompt) {
   clearScene();
   clearLog();
   clearAssets();
-  setRunning(true);
-  setStatus("POST /generate …");
+  treeClear();
+  currentSlotId = id;
+  try { localStorage.setItem(SLOT_STORAGE_KEY, id); } catch {}
+  renderSlotTabs();
+  setStatus(`slot :: ${id}`);
+  subscribe(slotEventsUrl(id));
+}
 
-  const payload = { model: MODEL, prompt };
-  let res;
+function slotEventsUrl(id) {
+  return new URL(`/slots/${encodeURIComponent(id)}/events`, SERVER_URL).toString();
+}
+
+async function resetSlot(id) {
+  const ok = window.confirm(
+    `Wipe runs/${id}/ and restart the pipeline for this slot?`,
+  );
+  if (!ok) return;
+  resetEl.disabled = true;
   try {
-    res = await fetch(new URL("/generate", SERVER_URL), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    const res = await fetch(
+      new URL(`/slots/${encodeURIComponent(id)}/reset`, SERVER_URL),
+      { method: "POST" },
+    );
+    if (!res.ok) {
+      setStatus(`reset failed: HTTP ${res.status}`, "err");
+      return;
+    }
+    if (currentSource) {
+      currentSource.close();
+      currentSource = null;
+    }
+    clearScene();
+    clearLog();
+    clearAssets();
+    treeClear();
+    setStatus(`slot ${id} reset — streaming events…`);
+    subscribe(slotEventsUrl(id));
+    refreshSlots();
   } catch (e) {
-    setStatus(`request failed: ${e.message}`, "err");
-    setRunning(false);
-    return;
+    setStatus(`reset failed: ${e.message}`, "err");
+  } finally {
+    resetEl.disabled = false;
   }
-  if (!res.ok) {
-    setStatus(`HTTP ${res.status}: ${await res.text()}`, "err");
-    setRunning(false);
-    return;
-  }
-  const { run_id, events_url } = await res.json();
-  setStatus(`run ${run_id} — streaming events…`);
-  subscribe(new URL(events_url, SERVER_URL).toString());
 }
 
 function subscribe(url) {
@@ -606,26 +1047,65 @@ function subscribe(url) {
     // EventSource auto-reconnects on transient failures; only surface a hard close.
     if (es.readyState === EventSource.CLOSED && currentSource === es) {
       setStatus("stream closed", "err");
-      setRunning(false);
       currentSource = null;
     }
   };
 }
 
-formEl.addEventListener("submit", (ev) => {
-  ev.preventDefault();
-  const prompt = inputEl.value.trim();
-  if (!prompt) {
-    setStatus("prompt is empty", "err");
+async function rewindTo(index) {
+  if (currentSlotId === null) return;
+  if (currentSource) {
+    currentSource.close();
+    currentSource = null;
+  }
+  clearScene();
+  clearLog();
+  clearAssets();
+  treeClear();
+  setStatus(`POST /slots/${currentSlotId}/rewind to ${index} …`);
+
+  let res;
+  try {
+    res = await fetch(
+      new URL(`/slots/${encodeURIComponent(currentSlotId)}/rewind`, SERVER_URL),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to_event_index: index }),
+      },
+    );
+  } catch (e) {
+    setStatus(`rewind failed: ${e.message}`, "err");
     return;
   }
-  startRun(prompt);
+  if (!res.ok) {
+    setStatus(`HTTP ${res.status}: ${await res.text()}`, "err");
+    return;
+  }
+  setStatus(`rewound to ${index} — streaming events…`);
+  subscribe(slotEventsUrl(currentSlotId));
+  refreshSlots();
+}
+
+resetEl.addEventListener("click", () => {
+  if (currentSlotId !== null) resetSlot(currentSlotId);
 });
 
-// Cmd/Ctrl+Enter submits from inside the textarea.
-inputEl.addEventListener("keydown", (ev) => {
-  if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
-    ev.preventDefault();
-    formEl.requestSubmit();
+document.getElementById("zoom-in").addEventListener("click", () => _dolly(0.8));
+document.getElementById("zoom-out").addEventListener("click", () => _dolly(1.25));
+
+// Boot: load slot list, pick the remembered slot (or the first), subscribe.
+(async () => {
+  await refreshSlots();
+  if (slotSummaries.length === 0) {
+    setStatus("no slots reported by server", "err");
+    return;
   }
-});
+  let saved = null;
+  try { saved = localStorage.getItem(SLOT_STORAGE_KEY); } catch {}
+  const pick = slotSummaries.find((s) => s.id === saved)?.id ?? slotSummaries[0].id;
+  switchSlot(pick);
+})();
+
+// Keep tab status dots fresh for slots the user isn't viewing.
+setInterval(refreshSlots, 2000);

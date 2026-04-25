@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TypeVar
-
 from app.core.prompts import ChildNodeSpec, ObjectSpec
 
-T = TypeVar("T", bound=ChildNodeSpec)
 
+def validate_sibling_relationships_acyclic(children: list[ChildNodeSpec]) -> None:
+    """Raise ValueError if any set of siblings forms a cyclic relationship.
 
-def toposort_children(children: list[T]) -> list[T]:
-    """Order children so each is placed after all its sibling dependencies.
-
-    Relationships targeting the parent (or any non-sibling id) do not
-    constrain order. Self-loops are ignored. Cycles raise ValueError.
-    Stable: independent children keep their input order.
+    The batch bbox resolver places every sibling in one shot, so ordering
+    doesn't matter — but a cyclic relationship graph (A ABOVE B, B ABOVE A)
+    is semantically contradictory and should be caught before the LLM is
+    asked to satisfy it. Relationships targeting the parent (or any
+    non-sibling id) don't contribute edges. Self-loops are ignored.
     """
     by_id = {c.id: c for c in children}
     deps: dict[str, set[str]] = {c.id: set() for c in children}
@@ -23,18 +21,23 @@ def toposort_children(children: list[T]) -> list[T]:
             if r.target in by_id and r.target != c.id:
                 deps[c.id].add(r.target)
 
-    ordered: list[T] = []
-    remaining = {c.id for c in children}
-    while remaining:
-        ready = [
-            c for c in children
-            if c.id in remaining and deps[c.id] <= {s.id for s in ordered}
-        ]
-        if not ready:
-            raise ValueError(f"cyclic sibling relationships among: {sorted(remaining)}")
-        ordered.extend(ready)
-        remaining -= {c.id for c in ready}
-    return ordered
+    color: dict[str, int] = {}  # 0=unseen, 1=on-stack, 2=done
+
+    def visit(node_id: str) -> None:
+        state = color.get(node_id, 0)
+        if state == 1:
+            raise ValueError(
+                f"cyclic sibling relationships through {node_id!r}"
+            )
+        if state == 2:
+            return
+        color[node_id] = 1
+        for dep in deps[node_id]:
+            visit(dep)
+        color[node_id] = 2
+
+    for c in children:
+        visit(c.id)
 
 
 def validate_object_relationships(
@@ -92,3 +95,5 @@ def validate_object_relationships(
 
     for s in specs:
         visit(s.id)
+
+    validate_sibling_relationships_acyclic(specs)

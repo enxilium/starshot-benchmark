@@ -1,63 +1,194 @@
-"""HTTP API — POST /generate, GET /run (SSE)."""
+"""HTTP API — slot-scoped endpoints.
+
+All seven benchmark slots (see app.core.slots) auto-boot on lifespan
+startup: fresh slots are seeded with a `run.start`, resumable slots drop
+their trailing `run.error` (if any) and continue from where they stopped,
+completed slots stay idle. Every asyncio task is bound to its SlotLog via
+a ContextVar, so concurrent pipeline work routes events to the right
+slot without threading a handle through every call site.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
-import uuid
+import shutil
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app.pipeline import divider
+from app.core.slots import DEFAULT_MODEL, SLOTS, SLOTS_BY_ID, Slot
+from app.pipeline import divider, generation
+from app.services import llm
 from app.utils import logging as rlog
+from app.utils.logging import SlotLog
 
 RUNS_DIR = Path("./runs")
-RUNS_DIR.mkdir(parents=True, exist_ok=True)
+LEGACY_CURRENT_DIR = RUNS_DIR / "current"
 
-_task: asyncio.Task[None] | None = None
+_slot_logs: dict[str, SlotLog] = {}
+_tasks: dict[str, asyncio.Task[None]] = {}
 
 
-class GenerateRequest(BaseModel):
-    prompt: str
-    model: str
+class RewindRequest(BaseModel):
+    to_event_index: int
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        llm.set_model(DEFAULT_MODEL)
+        for slot in SLOTS:
+            slot_dir = RUNS_DIR / slot.id
+            slot_dir.mkdir(parents=True, exist_ok=True)
+            slot_log = SlotLog(slot.id, slot_dir / "events.jsonl")
+            slot_log.hydrate_from_disk()
+            _slot_logs[slot.id] = slot_log
+            _maybe_launch(slot, slot_log)
+        try:
+            yield
+        finally:
+            for task in _tasks.values():
+                task.cancel()
+            for task in list(_tasks.values()):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+    app = FastAPI(
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/artifacts", StaticFiles(directory=RUNS_DIR), name="artifacts")
 
-    @app.post("/generate")
-    async def generate(req: GenerateRequest) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
-        global _task
-        run_id = uuid.uuid4().hex
-        rlog.start_run(prompt=req.prompt, model=req.model)
-        _task = asyncio.create_task(_run(run_id, req.prompt, req.model))
-        return {"run_id": run_id, "events_url": "/run"}
+    @app.get("/slots")
+    async def list_slots() -> list[dict[str, object]]:  # pyright: ignore[reportUnusedFunction]
+        return [_slot_summary(s) for s in SLOTS]
 
-    @app.get("/run")
-    async def run_stream() -> StreamingResponse:  # pyright: ignore[reportUnusedFunction]
+    @app.get("/slots/{slot_id}/events")
+    async def slot_events(slot_id: str) -> StreamingResponse:  # pyright: ignore[reportUnusedFunction]
+        slot_log = _require_slot_log(slot_id)
         # Subscribe and snapshot synchronously — no await between them, so no
         # log() call can land in both the snapshot and the live queue.
-        q = rlog.subscribe()
-        snapshot = list(rlog.STATE["events"])
-        return StreamingResponse(_sse(q, snapshot), media_type="text/event-stream")
+        q = slot_log.subscribe()
+        snapshot = list(slot_log.state["events"])
+        return StreamingResponse(
+            _sse(slot_log, q, snapshot),
+            media_type="text/event-stream",
+        )
+
+    @app.post("/slots/{slot_id}/rewind")
+    async def slot_rewind(slot_id: str, req: RewindRequest) -> dict[str, int | str]:  # pyright: ignore[reportUnusedFunction]
+        slot = _require_slot(slot_id)
+        slot_log = _slot_logs[slot_id]
+        if slot_log.state.get("prompt") is None or slot_log.state.get("model") is None:
+            raise HTTPException(
+                status_code=400,
+                detail="slot has no run to rewind",
+            )
+        await _cancel_task(slot_id)
+        new_len = slot_log.truncate_events_to(req.to_event_index)
+        _tasks[slot.id] = asyncio.create_task(_run(slot.id))
+        return {"slot_id": slot.id, "events": new_len}
+
+    @app.post("/slots/{slot_id}/reset")
+    async def slot_reset(slot_id: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        slot = _require_slot(slot_id)
+        await _cancel_task(slot_id)
+        slot_dir = RUNS_DIR / slot.id
+        shutil.rmtree(slot_dir, ignore_errors=True)
+        slot_dir.mkdir(parents=True, exist_ok=True)
+        slot_log = SlotLog(slot.id, slot_dir / "events.jsonl")
+        _slot_logs[slot.id] = slot_log
+        slot_log.start_run(slot.prompt, DEFAULT_MODEL)
+        _tasks[slot.id] = asyncio.create_task(_run(slot.id))
+        return {"slot_id": slot.id}
 
     return app
 
 
+def _slot_summary(slot: Slot) -> dict[str, object]:
+    slot_log = _slot_logs.get(slot.id)
+    state = (
+        slot_log.state
+        if slot_log is not None
+        else {
+            "status": "idle",
+            "prompt": slot.prompt,
+            "events": [],
+        }
+    )
+    events = state.get("events", [])
+    return {
+        "id": slot.id,
+        "prompt": state.get("prompt") or slot.prompt,
+        "status": state.get("status", "idle"),
+        "events_count": len(events),
+        "last_kind": events[-1]["kind"] if events else None,
+    }
+
+
+def _maybe_launch(slot: Slot, slot_log: SlotLog) -> None:
+    """Seed or resume the slot and kick off a task if there's work to do.
+    Completed slots (last event == run.done) stay idle."""
+    events = slot_log.state["events"]
+    if not events:
+        slot_log.start_run(slot.prompt, DEFAULT_MODEL)
+        _tasks[slot.id] = asyncio.create_task(_run(slot.id))
+        return
+    # Resume on the current default model, regardless of which model the
+    # original run.start was recorded under. The on-disk event log keeps
+    # its history; only the in-memory routing changes.
+    slot_log.state["model"] = DEFAULT_MODEL
+    last_kind = events[-1].get("kind")
+    if last_kind == "run.done":
+        return
+    if last_kind == "run.error":
+        # Drop the trailing error so SSE snapshot replay doesn't terminate
+        # mid-stream on the fresh retry about to run.
+        slot_log.truncate_events_to(len(events) - 1)
+    _tasks[slot.id] = asyncio.create_task(_run(slot.id))
+
+
+def _require_slot(slot_id: str) -> Slot:
+    slot = SLOTS_BY_ID.get(slot_id)
+    if slot is None:
+        raise HTTPException(status_code=404, detail=f"unknown slot: {slot_id}")
+    return slot
+
+
+def _require_slot_log(slot_id: str) -> SlotLog:
+    _require_slot(slot_id)
+    return _slot_logs[slot_id]
+
+
+async def _cancel_task(slot_id: str) -> None:
+    task = _tasks.pop(slot_id, None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+
+
 async def _sse(
+    slot_log: SlotLog,
     q: asyncio.Queue[dict[str, object]],
     snapshot: list[dict[str, object]],
 ) -> AsyncIterator[str]:
@@ -66,21 +197,37 @@ async def _sse(
     try:
         for event in snapshot:
             yield f"data: {json.dumps(event)}\n\n"
-            if event["kind"] == "run.done":
+            if event["kind"] in {"run.done", "run.error"}:
                 return
         while True:
             event = await q.get()
             yield f"data: {json.dumps(event)}\n\n"
-            if event["kind"] == "run.done":
+            if event["kind"] in {"run.done", "run.error"}:
                 return
     finally:
-        rlog.unsubscribe(q)
+        slot_log.unsubscribe(q)
 
 
-async def _run(run_id: str, prompt: str, model: str) -> None:
+async def _run(slot_id: str) -> None:
+    slot_log = _slot_logs[slot_id]
+    rlog.bind(slot_log)
+    prompt = slot_log.state["prompt"]
+    model = slot_log.state["model"]
     try:
-        await divider.run(run_id=run_id, prompt=prompt, model=model, runs_dir=RUNS_DIR)
+        await divider.run(
+            run_id=slot_id,
+            prompt=prompt,
+            model=model,
+            runs_dir=RUNS_DIR,
+        )
+    except asyncio.CancelledError:
+        generation.cancel_pending(slot_id)
+        raise
     except Exception as e:  # noqa: BLE001
-        rlog.log("run.error", message=f"{type(e).__name__}: {e}")
-    finally:
-        rlog.finish_run()
+        generation.cancel_pending(slot_id)
+        slot_log.log("run.error", message=f"{type(e).__name__}: {e}")
+        return
+    # Pipeline tree is fully resolved; meshes may still be in flight.
+    # Hold the run open until they all land so `run.done` truly means done.
+    await generation.await_pending(slot_id)
+    slot_log.finish_run()
