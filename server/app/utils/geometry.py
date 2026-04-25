@@ -1,13 +1,8 @@
 """Mesh post-processing: yaw rotation + rescaling into a target bbox.
 
-Two scaling modes:
-  * "cover" — uniform scale by MAX ratio. Mesh covers the bbox on its
-              tightest axis and may overflow the others; proportions are
-              preserved. For discrete objects (chair, lamp, tree) where
-              the bbox is a size guide, not a hard cage.
-  * "fill"  — per-axis scale, mesh exactly fills the bbox. Distorts
-              proportions. For encapsulating geometry (walls, floors,
-              ceilings) where the bbox IS the shape.
+Per-axis scaling: each axis is scaled independently so the mesh exactly
+fills the bbox on every axis. Proportions are not preserved — the
+guarantee is that the mesh is fully contained in the bbox.
 
 Orientation contract:
   Trellis 2 returns a mesh whose intrinsic front face points along +Z
@@ -20,26 +15,21 @@ Orientation contract:
 
 Order of operations: translate to origin → yaw → scale → translate to
 bbox center. Yaw is applied to the unscaled mesh so it composes cleanly
-with per-axis "fill" scaling.
+with per-axis scaling.
 """
 
 from __future__ import annotations
-
-from typing import Literal
 
 import numpy as np
 import trimesh
 
 from app.core.types import BoundingBox
 
-RescaleMode = Literal["cover", "fill"]
-
 
 def rescale_mesh_to_bbox(
     mesh: trimesh.Trimesh | trimesh.Scene,
     bbox: BoundingBox,
     *,
-    mode: RescaleMode,
     orientation: float = 0.0,
 ) -> trimesh.Trimesh | trimesh.Scene:
     if mesh.is_empty:
@@ -58,12 +48,7 @@ def rescale_mesh_to_bbox(
     if np.any(rotated_extents <= 0):
         raise ValueError("degenerate mesh has zero extent on some axis")
     target_extents = np.asarray(bbox.size, dtype=float)
-
-    if mode == "fill":
-        scale_vec = target_extents / rotated_extents
-    else:
-        s = float(np.max(target_extents / rotated_extents))
-        scale_vec = np.array([s, s, s])
+    scale_vec = target_extents / rotated_extents
 
     S = np.diag([scale_vec[0], scale_vec[1], scale_vec[2], 1.0])
     T_target = trimesh.transformations.translation_matrix(
