@@ -351,19 +351,21 @@ scene.add(sceneRoot);
 // and so clearScene can nuke them independently.
 const bboxRoot = new THREE.Group();
 scene.add(bboxRoot);
-bboxRoot.visible = localStorage.getItem(BBOX_VISIBLE_STORAGE_KEY) !== "0";
+let bboxesShown = localStorage.getItem(BBOX_VISIBLE_STORAGE_KEY) !== "0";
 function applyBboxToggleLabel() {
-  bboxToggleEl.textContent = `bboxes: ${bboxRoot.visible ? "on" : "off"}`;
-  bboxToggleEl.classList.toggle("off", !bboxRoot.visible);
+  bboxToggleEl.textContent = `bboxes: ${bboxesShown ? "on" : "off"}`;
+  bboxToggleEl.classList.toggle("off", !bboxesShown);
 }
 applyBboxToggleLabel();
 bboxToggleEl.addEventListener("click", () => {
-  bboxRoot.visible = !bboxRoot.visible;
-  localStorage.setItem(BBOX_VISIBLE_STORAGE_KEY, bboxRoot.visible ? "1" : "0");
+  bboxesShown = !bboxesShown;
+  localStorage.setItem(BBOX_VISIBLE_STORAGE_KEY, bboxesShown ? "1" : "0");
   applyBboxToggleLabel();
+  refreshAllBboxVisibility();
 });
 const bboxes = new Map(); // id -> THREE.Box3Helper
 const proxies = new Map(); // id -> THREE.Mesh (wireframe proxy silhouette)
+const modelsById = new Map(); // id -> THREE.Object3D (the loaded gltf.scene)
 let hoveredBboxId = null;
 
 const BBOX_COLOR_DEFAULT = 0xff3b3b;
@@ -609,6 +611,7 @@ function clearScene() {
     mesh.material?.dispose?.();
   }
   proxies.clear();
+  modelsById.clear();
   hoveredBboxId = null;
   selectedBboxId = null;
   tooltip.style.display = "none";
@@ -670,7 +673,19 @@ async function _loadModelNow(event, gen) {
       }
     });
     gltf.scene.name = `${event.artifact_kind}:${event.id}`;
+    const prevModel = modelsById.get(event.id);
+    if (prevModel) {
+      sceneRoot.remove(prevModel);
+      prevModel.traverse?.((n) => {
+        if (n.isMesh) {
+          n.geometry?.dispose?.();
+          const mats = Array.isArray(n.material) ? n.material : n.material ? [n.material] : [];
+          for (const m of mats) m.dispose?.();
+        }
+      });
+    }
     sceneRoot.add(gltf.scene);
+    modelsById.set(event.id, gltf.scene);
     fitToScene();
     upsertAsset(event.id, { status: "loaded" });
   } catch (e) {
@@ -724,6 +739,7 @@ function loadBbox(event) {
   // If this id is already selected (user clicked before bbox arrived, or a
   // bbox is being replaced), reapply the selection color.
   applyBboxColor(id);
+  applyBboxVisibility(id);
 }
 
 function buildProxyWireframe(proxyShape, origin, dimensions) {
@@ -776,9 +792,6 @@ function buildProxyWireframe(proxyShape, origin, dimensions) {
 }
 
 const raycaster = new THREE.Raycaster();
-// Box3Helper is a LineSegments; a generous threshold makes thin wireframes
-// (and zero-thickness walls) comfortably hoverable.
-raycaster.params.Line.threshold = 0.1;
 const pointer = new THREE.Vector2();
 
 function applyBboxColor(id) {
@@ -797,12 +810,26 @@ function applyBboxColor(id) {
   if (proxy) proxy.material.color.setHex(color);
 }
 
+function applyBboxVisibility(id) {
+  const visible = bboxesShown || id === hoveredBboxId || id === selectedBboxId;
+  const helper = bboxes.get(id);
+  if (helper) helper.visible = visible;
+  const proxy = proxies.get(id);
+  if (proxy) proxy.visible = visible;
+}
+
+function refreshAllBboxVisibility() {
+  for (const id of bboxes.keys()) applyBboxVisibility(id);
+}
+
 function setHoveredBbox(id) {
   if (id === hoveredBboxId) return;
   const prev = hoveredBboxId;
   hoveredBboxId = id;
   applyBboxColor(prev);
   applyBboxColor(id);
+  if (prev !== null) applyBboxVisibility(prev);
+  if (id !== null) applyBboxVisibility(id);
 }
 
 // Fit the camera to a single Box3 — parameterised variant of fitToScene.
@@ -825,8 +852,14 @@ function selectTreeNode(id) {
   const prev = selectedBboxId;
   // Toggle off if re-clicking the same node.
   selectedBboxId = prev === id ? null : id;
-  if (prev !== null) applyBboxColor(prev);
-  if (selectedBboxId !== null) applyBboxColor(selectedBboxId);
+  if (prev !== null) {
+    applyBboxColor(prev);
+    applyBboxVisibility(prev);
+  }
+  if (selectedBboxId !== null) {
+    applyBboxColor(selectedBboxId);
+    applyBboxVisibility(selectedBboxId);
+  }
   renderTree();
   if (selectedBboxId !== null) {
     const helper = bboxes.get(selectedBboxId);
@@ -851,18 +884,26 @@ renderer.domElement.addEventListener("pointermove", (ev) => {
   pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
-  const targets = Array.from(bboxes.values());
-  const hits = raycaster.intersectObjects(targets, false);
+  // Raycast against the actual loaded meshes, not against bbox wireframes:
+  // hovering on the object reveals its bbox + name even when the bbox
+  // overlay is toggled off.
+  const hits = raycaster.intersectObject(sceneRoot, true);
+  let hoveredId = null;
   if (hits.length > 0) {
-    const id = hits[0].object.userData.bboxId ?? null;
-    setHoveredBbox(id);
-    if (id !== null) {
-      positionTooltip(ev.clientX, ev.clientY, id);
-      return;
+    let obj = hits[0].object;
+    while (obj && obj.parent && obj.parent !== sceneRoot) obj = obj.parent;
+    if (obj && obj !== sceneRoot) {
+      const name = obj.name || "";
+      const colon = name.indexOf(":");
+      if (colon > 0) hoveredId = name.slice(colon + 1);
     }
   }
-  setHoveredBbox(null);
-  tooltip.style.display = "none";
+  setHoveredBbox(hoveredId);
+  if (hoveredId !== null) {
+    positionTooltip(ev.clientX, ev.clientY, hoveredId);
+  } else {
+    tooltip.style.display = "none";
+  }
 });
 
 renderer.domElement.addEventListener("pointerleave", () => {
@@ -872,16 +913,20 @@ renderer.domElement.addEventListener("pointerleave", () => {
 
 // --- event dispatch ---------------------------------------------------------
 
+// Event-index high-water mark. The server re-replays the entire snapshot
+// from index 0 on every SSE (re)connect. EventSource auto-reconnects on its
+// own (server idle, network blip), so without this guard we'd wipe and
+// reload every model on every reconnect — which is exactly the "models keep
+// reloading" behaviour the user reports when inspecting a finished run. We
+// dedupe by index instead and let already-processed events fall through.
+// Reset to -1 only on explicit user-driven state wipes (slot switch, reset,
+// rewind), where a fresh replay genuinely needs to be re-applied.
+let highestEventIndex = -1;
+
 function dispatch(event) {
-  // A snapshot replay always begins with the index-0 run.start event. If we
-  // already have log content, this is a fresh snapshot from a reconnect
-  // (server restart / EventSource auto-reconnect) — wipe stale state so the
-  // replay renders cleanly.
-  if (event.index === 0 && event.kind === "run.start" && logEl.children.length > 0) {
-    clearScene();
-    clearLog();
-    clearAssets();
-    treeClear();
+  if (typeof event.index === "number") {
+    if (event.index <= highestEventIndex) return;
+    highestEventIndex = event.index;
   }
   appendEvent(event);
   switch (event.kind) {
@@ -987,6 +1032,7 @@ function switchSlot(id) {
   clearLog();
   clearAssets();
   treeClear();
+  highestEventIndex = -1;
   currentSlotId = id;
   try { localStorage.setItem(SLOT_STORAGE_KEY, id); } catch {}
   renderSlotTabs();
@@ -1021,6 +1067,7 @@ async function resetSlot(id) {
     clearLog();
     clearAssets();
     treeClear();
+    highestEventIndex = -1;
     setStatus(`slot ${id} reset — streaming events…`);
     subscribe(slotEventsUrl(id));
     refreshSlots();
@@ -1062,6 +1109,7 @@ async function rewindTo(index) {
   clearLog();
   clearAssets();
   treeClear();
+  highestEventIndex = -1;
   setStatus(`POST /slots/${currentSlotId}/rewind to ${index} …`);
 
   let res;

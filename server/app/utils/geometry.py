@@ -35,15 +35,24 @@ def rescale_mesh_to_bbox(
     if mesh.is_empty:
         raise ValueError("cannot rescale an empty mesh")
     out = mesh.copy()
-    cur_min, cur_max = out.bounds
-    mesh_center = (cur_min + cur_max) / 2.0
 
-    T_origin = trimesh.transformations.translation_matrix(-mesh_center)
+    # Rotate first (around origin), THEN re-derive the AABB and recenter.
+    # Rotating an origin-centered AABB does not preserve centering — vertex
+    # positions don't have to be symmetric inside their AABB, so a rotation
+    # around the AABB centre can land the new AABB off-origin. Centering
+    # before rotation and skipping the post-rotation recenter would scale
+    # off-centered bounds and translate by `bbox.center`, leaving the mesh
+    # overhanging the bbox by `S · rotated_center`. Recenter after R so the
+    # subsequent per-axis scale is symmetric.
     R = trimesh.transformations.rotation_matrix(orientation, [0.0, 1.0, 0.0])
-    out.apply_transform(T_origin)
     out.apply_transform(R)
 
     rotated_min, rotated_max = out.bounds
+    rotated_center = (rotated_min + rotated_max) / 2.0
+    out.apply_transform(
+        trimesh.transformations.translation_matrix(-rotated_center)
+    )
+
     rotated_extents = np.asarray(rotated_max - rotated_min, dtype=float)
     if np.any(rotated_extents <= 0):
         raise ValueError("degenerate mesh has zero extent on some axis")

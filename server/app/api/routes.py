@@ -225,7 +225,25 @@ async def _run(slot_id: str) -> None:
         raise
     except Exception as e:  # noqa: BLE001
         generation.cancel_pending(slot_id)
-        slot_log.log("run.error", message=f"{type(e).__name__}: {e}")
+        # OpenRouter SDK errors only stringify to the top-level "Provider
+        # returned error" message; the actually useful detail (upstream
+        # provider's complaint, the request body that tripped it) lives on
+        # `data.error.metadata` and on `e.body` (the response body the SDK
+        # already read; `raw_response.text` would re-trigger a read on a
+        # closed streaming response). Pull both into the logged message so
+        # the run.error event tells us what went wrong.
+        details = []
+        data = getattr(e, "data", None)
+        err = getattr(data, "error", None) if data is not None else None
+        if err is not None:
+            metadata = getattr(err, "metadata", None)
+            if metadata:
+                details.append(f"metadata={metadata}")
+        body = getattr(e, "body", None)
+        if body:
+            details.append(f"body={body[:2000]}")
+        suffix = (" | " + " | ".join(details)) if details else ""
+        slot_log.log("run.error", message=f"{type(e).__name__}: {e}{suffix}")
         return
     # Pipeline tree is fully resolved; meshes may still be in flight.
     # Hold the run open until they all land so `run.done` truly means done.
