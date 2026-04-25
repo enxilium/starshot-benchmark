@@ -98,6 +98,154 @@ def _render_proxy_shape(p: ProxyShape | None) -> str:
     return p.value if p is not None else "BOX"
 
 
+# ---------- Step 1: zone plan (high-level authoring; runs for every zone) ---
+
+
+class ZonePlanOutput(BaseModel):
+    plan: str
+
+
+SYSTEM_ZONE_PLAN = """\
+You are authoring the HIGH-LEVEL PLAN for a region of a 3D scene \
+being built for StarshotBench — a head-to-head LLM benchmark where \
+your scene is rendered and judged against another LLM's rendering of \
+the same user prompt. Judges weigh prompt fidelity, compositional \
+coherence, recognizability, detail richness, and creativity; they see \
+only the final scene, not the prompts, not the plan.
+
+Your job is to TRANSFORM the region's prompt into a vivid, \
+opinionated, concrete vision for what this region IS. The prompt is a \
+seed (e.g. "a beautiful modern mansion", "a low muddy island", "the \
+imperial box"). Your output is the AUTHORED VISION that makes the \
+seed specific, distinctive, and memorable. A vague, template-y plan \
+produces a region that reads as stock assets. A vivid, committed plan \
+propagates specificity all the way to the rendered mesh — and the \
+judges see the difference. Don't play it safe. Commit to a point of \
+view: an adequate plan calls a region "a medium muddy island"; a \
+winning plan makes it "a low hummock fringed with twisted cypress \
+roots, dominated by a lone lightning-split stump that reads as the \
+island's character from any angle".
+
+If this region is the ROOT (the whole scene), this plan IS the SCENE \
+PLAN — the north-star that every descendant inherits. If it is a \
+NESTED region, your plan must stay consistent with the character your \
+direct ancestors committed to (shown in the inputs) and must not \
+contradict any concrete object already generated in the scene.
+
+<what_to_write>
+ONE cohesive paragraph (no headers, no lists), roughly 5-10 \
+sentences, that:
+  * Sets the CHARACTER — the mood, era, palette, materials, lighting \
+    feel, silhouette of this region. Commit to a point of view: is \
+    the mansion sun-bleached coastal modernism or brooding hillside \
+    concrete? Is the island lush moss-cushioned or bleached \
+    salt-crusted? The user did not pick; you do.
+  * Names the FEATURES OF INTEREST that give the region its \
+    identity — focal points, landmarks, anchors a viewer would point \
+    at (a stone hearth, a central fountain, a writing desk, a lone \
+    lightning-split stump). Be concrete about what makes each \
+    distinctive.
+  * For the ROOT only: also suggest the OVERALL SILHOUETTE / SHAPE \
+    of the scene — tall and narrow (a skyscraper), long and flat (a \
+    river), wide and shallow (a coastal vista), roughly cubic (a \
+    room). This feeds directly into the next step, which sizes the \
+    canvas.
+</what_to_write>
+
+<what_NOT_to_write>
+  * Do NOT decide structural decomposition. Do not say "this \
+    subdivides", "this is atomic", "the children are X and Y", or \
+    enumerate sub-regions as a planned tree. A separate downstream \
+    step (the ZONE DECOMPOSE step) makes that call using your plan \
+    as input — pre-empting it cripples that step. You may describe a \
+    region as containing distinct loci of character ("the grounds \
+    pivot between a formal front garden and a wild rear orchard"); \
+    the decomposer will read that and decide whether to subdivide.
+  * Do NOT enumerate individual OBJECTS. No "a fountain", "a chair", \
+    "a chandelier", "a single tree", "a red flag" as a list of \
+    things to place. Object selection happens later in each atomic \
+    region's generation pass — those steps need AGENCY to pick \
+    objects in service of your character. You may describe the \
+    character those objects will collectively express ("the imperial \
+    box reads as ornate and ceremonial"), but stop short of listing \
+    the props.
+  * Do NOT pick coordinates, dimensions, counts, materials by brand, \
+    or specific instances. Stay at the level of mood, palette, \
+    identity, and silhouette.
+  * Do NOT describe camera, framing, or rendering. The pipeline \
+    handles those.
+</what_NOT_to_write>
+
+<inputs>
+  * The region being planned: its id and prompt.
+  * The ANCESTOR CHAIN — every region above this one in the tree, \
+    root first, each with its plan. The root's plan IS the SCENE \
+    PLAN. Empty for the root region (no ancestors — only the user \
+    prompt).
+  * The GENERATED OBJECTS — every concrete (mesh-bearing) object \
+    placed anywhere in the scene so far, with its parent. These are \
+    what the scene actually LOOKS like at this point in the run; \
+    lean on them to know what is already real and to avoid \
+    contradicting them. Lateral peer regions that are still abstract \
+    are NOT shown — only ancestors and concrete objects flow into \
+    your context.
+</inputs>
+
+Respond with ONE JSON object matching the schema. The `plan` field \
+holds the paragraph. No prose, no markdown, no code fences.\
+"""
+
+
+def render_zone_plan(
+    *,
+    zone_id: str,
+    zone_prompt: str,
+    ancestors: list[tuple[str, str, str]],
+    objects: list[tuple[str, str, str | None]],
+) -> str:
+    """ancestors: (id, prompt, plan) tuples from root → parent of this zone,
+    excluding the zone itself. Empty for the root.
+    objects: (id, prompt, parent_id) tuples for every concrete (mesh-bearing)
+    node placed anywhere in the run so far."""
+    zone_block = (
+        f"ZONE_ID (being planned): {zone_id!r}\n"
+        f"Zone prompt: {zone_prompt!r}"
+    )
+    if ancestors:
+        ancestor_block = "\n".join(
+            f"  - id={aid!r}\n"
+            f"    prompt: {aprompt}\n"
+            f"    plan: {aplan}"
+            for aid, aprompt, aplan in ancestors
+        )
+    else:
+        ancestor_block = "  (none — this zone is the root)"
+    if objects:
+        obj_block = "\n".join(
+            f"  - id={oid!r} parent={oparent!r}: {oprompt}"
+            for oid, oprompt, oparent in objects
+        )
+    else:
+        obj_block = "  (none — no concrete objects placed yet)"
+    if not ancestors:
+        return (
+            f"{zone_block}\n\n"
+            f"Generated objects placed so far:\n{obj_block}\n\n"
+            "This is the ROOT zone — the whole scene. Your plan IS the "
+            "SCENE PLAN that every descendant inherits, and it directly "
+            "shapes the canvas-sizing step that runs immediately after "
+            "this one. Author the high-level vision."
+        )
+    return (
+        f"Ancestor chain (root first → your direct parent, with each "
+        f"ancestor's plan):\n{ancestor_block}\n\n"
+        f"Generated objects placed so far:\n{obj_block}\n\n"
+        f"{zone_block}\n\n"
+        "Author this region's high-level plan, consistent with the "
+        "ancestor chain above."
+    )
+
+
 # ---------- Step 2: overall bbox --------------------------------------------
 
 
@@ -109,11 +257,14 @@ SYSTEM_OVERALL_BBOX = """\
 You are picking the OVERALL bounding box for a 3D scene — the SCENE'S \
 CANVAS that every zone, object, and ambient element will be placed \
 inside. This pipeline is part of StarshotBench, a head-to-head LLM \
-benchmark, and this is the first authored decision of the run: the \
-aspect ratio you pick here shapes how every downstream step composes. \
-Match the scene's actual silhouette so later steps aren't fighting the \
-canvas — a skyscraper is tall and narrow, a river is long and flat, a \
-room is modest in every dimension.
+benchmark. The SCENE PLAN has already been authored upstream and is \
+shown to you in the inputs; your job is to size the canvas so it \
+matches the silhouette that plan implies. Get this wrong and every \
+downstream step is fighting the canvas — a skyscraper crammed into a \
+cube, a river squeezed into a square, a room ballooned into a \
+warehouse. Match the scene's actual silhouette: a skyscraper is tall \
+and narrow, a river is long and flat, a room is modest in every \
+dimension.
 
 The bounding box is axis-aligned, in meters, interpreted under the \
 CANONICAL FRONT VIEW: +X = right, +Y = up, +Z = toward the viewer \
@@ -131,61 +282,46 @@ Respond with ONE JSON object matching the schema. No prose, no markdown, no code
 """
 
 
-def render_overall_bbox(user_prompt: str) -> str:
+def render_overall_bbox(user_prompt: str, scene_plan: str) -> str:
     return (
         f"User prompt for the scene: {user_prompt!r}\n\n"
+        f"SCENE PLAN (authored upstream — size the canvas to match its "
+        f"implied silhouette):\n{scene_plan}\n\n"
         "Produce the overall bounding box for the whole scene."
     )
 
 
-# ---------- Step 2.5: zone plan (runs before every decomposition) -----------
+# ---------- Step 3: zone decompose (atomic vs subzones; runs after plan) ----
 
 
 class SubzoneSeed(BaseModel):
-    """A planned subzone authored alongside its parent's plan. The seed's
-    `plan` becomes the child Node's own zone plan when the child is placed,
-    so it must be a complete character/intent plan in its own right."""
+    """A subzone the decomposer commits to. Just `id` + `prompt` —
+    each child's high-level plan is authored later by the child's own
+    ZONE PLAN step when `_build` recurses into it."""
 
     id: str
     prompt: str
-    plan: str
 
 
-class ZonePlanOutput(BaseModel):
-    plan: str
+class ZoneDecomposeOutput(BaseModel):
     is_atomic: bool
     subzones: list[SubzoneSeed] = Field(default_factory=list)
 
 
-SYSTEM_ZONE_PLAN = """\
-You are authoring the PLAN for a ZONE of a 3D scene being built for \
-StarshotBench — a head-to-head competitive benchmark where your scene \
-will be rendered and judged against another LLM's rendering of the \
-same user prompt. Judges weigh prompt fidelity, compositional \
-coherence, recognizability, detail richness, and creativity; they see \
-only the final scene, not the prompts, not the plan.
+SYSTEM_ZONE_DECOMPOSE = """\
+You are deciding the STRUCTURE of a zone in a 3D scene built for \
+StarshotBench. The zone's HIGH-LEVEL PLAN was already authored by the \
+upstream ZONE PLAN step and is shown to you in the inputs as the ZONE \
+PLAN. Your single job: decide whether this zone is ATOMIC (a leaf — \
+its next level of detail is individual anchor objects, materialized \
+later by the generation pipeline) or SUBDIVIDES into child zones, and \
+if it subdivides, enumerate the child zones as seed (id, prompt) \
+pairs.
 
-THIS step is where your aesthetic judgment for this zone locks in. \
-The plan you write here is fetched VERBATIM by every downstream step \
-that touches this zone — decomposition, object choice, bbox \
-resolution, image authoring. A vivid, specific plan pushes every \
-downstream decision toward a coherent authored vision. A vague, \
-template-y plan produces a zone that reads like stock assets. The \
-difference shows up in the final render, and the judges see it.
-
-Don't play it safe. Commit to a point of view. If the scene prompt \
-says "a swamp with islands", an adequate plan calls this zone \
-"a medium muddy island"; a winning plan makes it "a low hummock \
-fringed with twisted cypress roots, dominated by a lone lightning- \
-split stump that reads as the island's character from any angle". \
-Details like that propagate all the way to the rendered mesh.
-
-At the ROOT level (the whole-scene zone), this plan sets the overall \
-scene direction and is fetched at every descendant planning and \
-decomposition step.
-At NON-ROOT levels, this plan is specific to the zone being planned \
-and MUST stay consistent with the SCENE PLAN and with every prior \
-zone's plan.
+You do NOT (re-)author the zone's plan, do NOT pick coordinates or \
+proxy shapes or relationships, and do NOT author each child's full \
+plan. Each child's high-level plan is authored later, by the child's \
+own ZONE PLAN step when the pipeline recurses into it.
 
 <zone_definition>
 A zone is a REGION OF THE SCENE — a subscene, an area, a place large \
@@ -195,35 +331,12 @@ garden of a mansion). It is SPATIAL — it has room inside it, and its \
 character comes from the ensemble of things that live there, not from \
 any single object. A single landmark, monument, trophy, centerpiece, \
 or hero prop — no matter how important — is an OBJECT inside a zone, \
-NOT a zone of its own: the trophy obelisk in an arena's imperial box \
-is an object within the imperial-box zone, not its own zone. Your \
-plan should make unmistakably clear what gives this region its \
-identity as a place.
+NOT a zone of its own.
 </zone_definition>
-
-<this_step_does_three_things>
-In a single output, you must:
-  1. Author this zone's character/intent PLAN.
-  2. Decide whether this zone is ATOMIC or SUBDIVIDES into child zones.
-  3. If it subdivides, AUTHOR THE PLAN for each child zone inline — \
-     each one a complete character/intent plan equivalent in quality \
-     to your own zone's plan, since the child Node will inherit it \
-     verbatim. If it is atomic, leave subzones empty.
-
-The structural decision (atomic vs subdivides) and the per-child \
-plans live in this same step deliberately: the parent's character \
-and the child set's identities are deeply linked, and authoring them \
-together produces a more coherent partition than splitting the work \
-across two LLM calls. The next pipeline step is purely structural \
-materialization — it takes your subzone seeds and assigns each one \
-a proxy_shape and the relationships anchoring it to the parent or \
-its siblings. It does NOT re-decide atomicity, re-author plans, or \
-add/remove children.
-</this_step_does_three_things>
 
 <atomic_vs_subdivides>
 This is the single most consequential structural decision in the \
-pipeline. You are answering: which regions of the scene deserve their \
+pipeline. You are answering: which regions of this zone deserve their \
 own dedicated plan and generation pass, and which melt into ambient \
 background?
 
@@ -239,10 +352,14 @@ garden. Judges see a scene that's all exterior, no authored spaces.
 
 Default to ATOMIC. Subdivision is opt-in. A zone subdivides ONLY \
 when it genuinely contains TWO OR MORE distinct loci of interest, \
-each deserving its own dedicated plan and focus. If you cannot give \
-each proposed child a unique, named reason to exist beyond "this is \
-the left part of the parent" or "this is the denser part of the \
-parent", STOP — emit is_atomic=true with subzones=[].
+each deserving its own dedicated plan and focus. The ZONE PLAN above \
+is your primary signal: if it implies multiple distinct loci (a \
+mansion's house + garden + stables; a hotel room's bedroom + \
+bathroom), subdivide. If it implies a single coherent place, mark it \
+atomic. If you cannot give each proposed child a unique, named \
+reason to exist beyond "this is the left part of the parent" or \
+"this is the denser part of the parent", STOP — emit is_atomic=true \
+with subzones=[].
 
 The sharpest test: if the "thing" you would carve out is essentially \
 ONE SINGLE ARTIFACT — a statue, a monument, an obelisk, a trophy, a \
@@ -259,8 +376,8 @@ A zone is NEVER any of the following:
   * An individual OBJECT — furniture, a flag, a prop, a single tree, \
     a statue, a monument, a fountain, any single artifact. Objects \
     are materialized later by the generation pipeline that fills \
-    atomic zones with generated meshes; they do NOT get their own zone \
-    no matter how prominent they are.
+    atomic zones with generated meshes; they do NOT get their own \
+    zone no matter how prominent they are.
   * A DISTRIBUTION, scatter, field, cover, crowd, or dressing layer \
     of similar items — lilypad clusters, grass patches, floating \
     debris, a crowd of people, a star field, a patch of flowers. \
@@ -292,8 +409,7 @@ A zone is NEVER any of the following:
     spars, a village of stilt huts in open swamp. A SINGLE drifting \
     artifact (a lone hot-air balloon, a single buoy, one tethered \
     lantern) is NOT a zone — it is a negative-space OBJECT picked up \
-    by the negative-space pass. The zone covers only the feature's \
-    extent; the surrounding medium remains negative space.
+    by the negative-space pass.
 
 Good subdivision — a mansion's grounds → the house, the formal \
 front garden, the stables, the rear orchard. Four distinct places, \
@@ -302,14 +418,12 @@ Good subdivision — a hotel room → bathroom, bedroom. Two rooms with \
 different functions and fixtures.
 Good subdivision — a battle arena → left audience stand, right \
 audience stand, rear audience stand, imperial box. Four distinct \
-seating regions with different characters (commoner stands vs. the \
-ornate royal box). The trophy obelisk in front of the imperial box \
-is NOT a fifth zone — it is an anchor object of the imperial-box \
-zone.
+seating regions with different characters. The trophy obelisk in \
+front of the imperial box is NOT a fifth zone — it is an anchor \
+object of the imperial-box zone.
 Bad subdivision — a swamp → open water, lilypad distribution, log \
 debris. The swamp-water expanse is NEGATIVE SPACE; the lilypad and \
-log scatters are populations of instanced objects that live INSIDE \
-that ambient layer, not separate zones.
+log scatters are populations of instanced objects.
 Bad subdivision — an island → north end, central mound, south end. \
 Pure geographic slicing with no distinct intent per piece.
 Bad subdivision — a bedroom → bed area, dresser area, reading nook. \
@@ -318,122 +432,93 @@ anchor OBJECTS inside the room, not sub-zones.
 Bad subdivision — an arena → audience stands, imperial box, trophy \
 obelisk. The first two are regions; the trophy obelisk is a single \
 artifact and must live as an anchor object inside the imperial-box \
-zone, not as a peer zone alongside it.
+zone.
 Bad subdivision — a lilypad colony → dense core, transitional apron, \
-frayed fringe. Density bands of a homogeneous scatter — always atomic.
+frayed fringe. Density bands of a homogeneous scatter — always \
+atomic.
 </atomic_vs_subdivides>
 
 <inputs>
-  * The zone being planned: its id, prompt, and axis-aligned bounding \
-    box (in meters, under the canonical front view: +X right, +Y up, \
-    +Z front).
-  * For non-root zones only: the overall scene prompt, the SCENE PLAN \
-    (the root zone's plan), and the PRIOR SCENE CONTEXT — every zone \
-    already declared in the run, with their plans.
+  * The zone being decomposed: its id, prompt, and axis-aligned \
+    bounding box (in meters, under the canonical front view: +X \
+    right, +Y up, +Z front).
+  * The ZONE PLAN — the high-level character/intent plan authored \
+    upstream for this zone. This is your primary signal. Let its \
+    named features and implied loci drive your decision.
+  * The ANCESTOR CHAIN — every zone above this one in the tree, \
+    root first, each with its plan. The root's plan IS the SCENE \
+    PLAN.
+  * The GENERATED OBJECTS — every concrete (mesh-bearing) object \
+    placed anywhere in the scene so far, with its parent.
 </inputs>
 
 <output>
-Emit a single ZonePlanOutput with three fields:
+Emit a single ZoneDecomposeOutput with two fields:
 
-  * `plan` — the zone's own character/intent plan. Required.
-    If an INHERITED PLAN is shown in the inputs (this zone was \
-    pre-planned by its parent's planning step), that plan is \
-    authoritative — re-emit it here verbatim, or with only minor \
-    polish if you spot a clear improvement. Do NOT drift from its \
-    character or invent new features. If no inherited plan is shown, \
-    write one cohesive paragraph from scratch that:
-      - Captures the zone's intent, mood, and character — what it IS \
-        and what makes it distinctive in the scene. Lean into \
-        specificity; vague plans cost you detail downstream.
-      - Names the FEATURES OF INTEREST that give the zone its \
-        identity — specific focal points, landmarks, or anchor \
-        objects a viewer would point at (a red objective flag, a \
-        stone hearth, a central fountain, a writing desk). Be \
-        concrete about what makes each distinct.
-      - Stays ABSTRACT about concrete layout. Do NOT prescribe \
-        coordinates, dimensions, counts, materials, brands, or \
-        specific object instances.
-      - Is concise: a short paragraph, at most ~5 sentences.
-
-  * `is_atomic` — bool. True iff this zone is a LEAF (no child zones); \
-    its next level of detail is individual anchor objects, materialized \
-    later by the generation pipeline. Most zones end up atomic.
+  * `is_atomic` — bool. True iff this zone is a LEAF (no child \
+    zones); its next level of detail is individual anchor objects, \
+    materialized later by the generation pipeline. Most zones end \
+    up atomic.
 
   * `subzones` — list of SubzoneSeed. EMPTY when is_atomic=true. \
-    REQUIRED when is_atomic=false: at least two seeds, one per child \
-    zone you are committing to. Each seed has:
-      - `id` — unique within the whole scene (do not collide with any \
-        id in the prior scene context).
-      - `prompt` — a short concrete description of the child zone.
-      - `plan` — the CHILD'S character/intent plan, written to the \
-        same standard as your own `plan` field above (vivid, \
-        specific, names features of interest, stays abstract about \
-        layout, ~5 sentences). The child Node will inherit this \
-        verbatim — so it must read as a fully-authored zone plan in \
-        its own right, not as a one-line label. Make each child's \
-        plan distinct from its siblings; do NOT reuse phrasing across \
-        siblings.
-
-Do NOT pick coordinates, dimensions, proxy shapes, or relationships \
-for subzones — those are the next step's job.
+    REQUIRED when is_atomic=false: at least two seeds, one per \
+    child zone you are committing to. Each seed has:
+      - `id` — unique within the whole scene (do not collide with \
+        any existing id, including the ancestor chain or generated \
+        objects).
+      - `prompt` — a 1-2 sentence concrete description of the child \
+        zone — rich enough to seed the child's own high-level plan \
+        when its ZONE PLAN step runs, but NOT a full plan. Name \
+        the region and its defining feature; do not pre-author its \
+        mood, palette, or list of objects.
 </output>
 
 Respond with ONE JSON object matching the schema. No prose, no markdown, no code fences.\
 """
 
 
-def render_zone_plan(
+def render_zone_decompose(
     *,
     zone_id: str,
     zone_prompt: str,
     zone_bbox: BoundingBox,
-    scene_prompt: str | None,
-    scene_plan: str | None,
-    prior_zones: list[tuple[str, str, str, str]],
-    inherited_plan: str | None = None,
+    zone_plan: str,
+    ancestors: list[tuple[str, str, str]],
+    objects: list[tuple[str, str, str | None]],
 ) -> str:
-    """For the root, pass scene_prompt=None, scene_plan=None, prior_zones=[].
-    For non-root zones, pass the scene prompt, the root's plan, and every
-    already-planned zone in the run (id, prompt, plan, parent_id).
-    `inherited_plan` is set when this zone was pre-planned by its parent's
-    planning step (every non-root zone in normal flow); the planner should
-    re-emit it as-is and focus its energy on the structural decisions."""
+    """ancestors: (id, prompt, plan) tuples from root → parent of this zone,
+    excluding the zone itself. Empty for the root.
+    objects: (id, prompt, parent_id) tuples for every concrete (mesh-bearing)
+    node placed anywhere in the run so far."""
     zone_block = (
-        f"ZONE_ID (being planned): {zone_id!r}\n"
+        f"ZONE_ID (being decomposed): {zone_id!r}\n"
         f"Zone prompt: {zone_prompt!r}\n"
-        f"Zone bbox: {zone_bbox.model_dump_json()}"
+        f"Zone bbox: {zone_bbox.model_dump_json()}\n"
+        f"ZONE PLAN (authored upstream — your primary signal):\n{zone_plan}"
     )
-    if scene_plan is None:
-        return (
-            f"{zone_block}\n\n"
-            "This is the ROOT zone — the whole scene. Produce the PLAN that "
-            "will guide every downstream zone decomposition, decide whether "
-            "the scene subdivides, and if so author each subzone's plan."
+    if ancestors:
+        ancestor_block = "\n".join(
+            f"  - id={aid!r}\n"
+            f"    prompt: {aprompt}\n"
+            f"    plan: {aplan}"
+            for aid, aprompt, aplan in ancestors
         )
-    if prior_zones:
-        lines = [
-            f"  - id={zid!r} parent={zparent!r}\n"
-            f"    prompt: {zprompt}\n"
-            f"    plan: {zplan}"
-            for zid, zprompt, zplan, zparent in prior_zones
-        ]
-        prior_block = "\n".join(lines)
     else:
-        prior_block = "  (none)"
-    inherited_block = (
-        f"INHERITED PLAN (authored by this zone's parent — re-emit as the "
-        f"`plan` field, do not drift from its character):\n{inherited_plan}"
-        if inherited_plan is not None
-        else "INHERITED PLAN: (none — author this zone's plan from scratch)"
-    )
+        ancestor_block = "  (none — this zone is the root)"
+    if objects:
+        obj_block = "\n".join(
+            f"  - id={oid!r} parent={oparent!r}: {oprompt}"
+            for oid, oprompt, oparent in objects
+        )
+    else:
+        obj_block = "  (none — no concrete objects placed yet)"
     return (
-        f"Overall scene prompt: {scene_prompt!r}\n\n"
-        f"SCENE PLAN (the north-star for the whole scene):\n{scene_plan}\n\n"
-        f"Prior zones declared so far:\n{prior_block}\n\n"
+        f"Ancestor chain (root first → your direct parent, with each "
+        f"ancestor's plan):\n{ancestor_block}\n\n"
+        f"Generated objects placed so far:\n{obj_block}\n\n"
         f"{zone_block}\n\n"
-        f"{inherited_block}\n\n"
-        "Re-emit (or author) this zone's PLAN, decide whether it subdivides, "
-        "and if so author every subzone's plan inline."
+        "Decide whether this zone is atomic or subdivides. If it "
+        "subdivides, emit one (id, prompt) seed per child zone."
     )
 
 
@@ -462,11 +547,11 @@ class ChildrenDecompOutput(BaseModel):
 
 SYSTEM_CHILDREN_DECOMP = """\
 You are the STRUCTURAL MATERIALIZATION step for a 3D scene zone in \
-StarshotBench. The atomic-vs-subdivides decision and the per-subzone \
-plans were ALREADY made by the upstream planning step. Your job is \
-narrow: take the planning step's subzone seeds and turn each one into \
-a concrete child spec by assigning a `proxy_shape` and the \
-`relationships` that anchor it inside the parent.
+StarshotBench. The atomic-vs-subdivides decision and the subzone \
+seed list were ALREADY made by the upstream ZONE DECOMPOSE step. \
+Your job is narrow: take the decomposer's subzone seeds and turn \
+each one into a concrete child spec by assigning a `proxy_shape` and \
+the `relationships` that anchor it inside the parent.
 
 You do NOT decide whether the zone subdivides. You do NOT add, remove, \
 rename, or rewrite subzones. You do NOT author plans. The seeds you \
@@ -477,10 +562,10 @@ Your only authored fields are `proxy_shape` and `relationships`.
 <inputs>
   * The parent zone being decomposed: its id, prompt, bbox, and its \
     own PLAN.
-  * Its SUBZONE SEEDS — one per child the planning step committed to. \
-    Each seed has `id`, `prompt`, and a full character/intent `plan`. \
-    Read each seed's plan; the silhouette implied by the plan is what \
-    drives your `proxy_shape` choice and your relationship anchoring.
+  * Its SUBZONE SEEDS — one per child the decomposer committed to. \
+    Each seed has `id` and `prompt`. Read each seed's prompt; the \
+    silhouette implied by the prompt is what drives your \
+    `proxy_shape` choice and your relationship anchoring.
   * The SCENE PLAN — the root zone's plan, the north-star for every \
     step.
   * The PRIOR SCENE CONTEXT — every zone already declared in the run, \
@@ -492,7 +577,7 @@ Emit one `ChildNodeSpec` per subzone seed, in the same order. For each:
   * `id` — copy the seed's id verbatim.
   * `prompt` — copy the seed's prompt verbatim.
   * `proxy_shape` — OPTIONAL. The child zone's collision-proxy shape, \
-    chosen from the silhouette implied by the seed's plan (a domed \
+    chosen from the silhouette implied by the seed's prompt (a domed \
     island → HEMISPHERE; a column or trunk-shaped region → CAPSULE; \
     most architectural zones → omit). See the PROXY SHAPE section.
   * `relationships` — REQUIRED, at least one per child. Anchors the \
@@ -538,8 +623,8 @@ def render_children_decomp(
     """prior_zones: list of (id, prompt, plan, parent_id) for every non-root
     zone already declared in the run, in declaration order. The root is
     communicated separately via scene_prompt + scene_plan. `plan` is the
-    zone's own plan, written by the planning step. `subzones` is the seed
-    list authored by that same planning step — id+prompt+plan per child."""
+    zone's own plan, written by the ZONE PLAN step. `subzones` is the seed
+    list authored by the ZONE DECOMPOSE step — id+prompt per child."""
     if prior_zones:
         lines = []
         for zid, zprompt, zplan, zparent in prior_zones:
@@ -553,8 +638,7 @@ def render_children_decomp(
         prior_block = "  (none)"
     seed_lines = "\n\n".join(
         f"  - id={s.id!r}\n"
-        f"    prompt: {s.prompt}\n"
-        f"    plan: {s.plan}"
+        f"    prompt: {s.prompt}"
         for s in subzones
     )
     return (
