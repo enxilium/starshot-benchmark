@@ -35,7 +35,10 @@ RETRYABLE: tuple[type[BaseException], ...] = (
 
 
 async def _submit_with_retry(
-    model: str, arguments: dict[str, Any], *, stage: str,
+    model: str,
+    arguments: dict[str, Any],
+    *,
+    stage: str,
 ) -> dict[str, Any]:
     for attempt in range(MAX_ATTEMPTS):
         try:
@@ -56,7 +59,8 @@ async def _download_with_retry(url: str, *, stage: str) -> bytes:
     for attempt in range(MAX_ATTEMPTS):
         try:
             async with httpx.AsyncClient(
-                timeout=180.0, follow_redirects=True,
+                timeout=180.0,
+                follow_redirects=True,
             ) as http:
                 resp = await http.get(url)
                 resp.raise_for_status()
@@ -80,7 +84,10 @@ _CONTENT_TYPE_EXT = {
 
 
 async def generate_mesh(
-    prompt: str, *, output_path: Path, image_stem: Path,
+    prompt: str,
+    *,
+    output_path: Path,
+    image_stem: Path,
 ) -> dict[str, Path]:
     """Run text -> image -> 3D. Saves the reference image alongside the
     GLB so the client asset browser can display it. Returns both paths."""
@@ -100,7 +107,15 @@ async def generate_mesh(
 
     img = await _submit_with_retry(
         NANO_BANANA_MODEL,
-        {"prompt": prompt},
+        {
+            "prompt": prompt,
+            "num_images": 1,
+            "aspect_ratio": "1:1",
+            "output_format": "png",
+            "resolution": "0.5K",
+            "limit_generations": True,
+            "thinking_level": "minimal",
+        },
         stage="nano_banana",
     )
     image_info = img["images"][0]
