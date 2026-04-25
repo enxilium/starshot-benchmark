@@ -638,22 +638,18 @@ function fitToScene() {
 
 const loader = new GLTFLoader();
 
-// Serial queue — snapshot replay on resume fires many `model` events at once,
-// and starting every GLTFLoader in parallel melts slower machines. Each call
-// chains onto the previous so only one GLB downloads / parses / uploads to
-// the GPU at a time. `sceneGen` invalidates loads still in flight when the
-// scene is reset (rewind / fresh snapshot on reconnect).
-let modelQueue = Promise.resolve();
+// Concurrent loads — each GLB fetches/parses/uploads independently. The
+// browser's per-origin connection limit (~6) naturally throttles the network
+// side. `sceneGen` invalidates loads still in flight when the scene is reset
+// (rewind / fresh snapshot on reconnect).
 let sceneGen = 0;
 
 function resetModelQueue() {
   sceneGen += 1;
-  modelQueue = Promise.resolve();
 }
 
 function loadModel(event) {
-  const gen = sceneGen;
-  modelQueue = modelQueue.then(() => _loadModelNow(event, gen));
+  _loadModelNow(event, sceneGen);
 }
 
 async function _loadModelNow(event, gen) {
@@ -890,10 +886,12 @@ function dispatch(event) {
       break;
     case "run.done":
       setStatus("run complete");
+      if (currentSource) { currentSource.close(); currentSource = null; }
       refreshSlots();
       break;
     case "run.error":
       setStatus(`error: ${event.message}`, "err");
+      if (currentSource) { currentSource.close(); currentSource = null; }
       refreshSlots();
       break;
     case "bbox":
