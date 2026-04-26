@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 
 const SERVER_URL = document
   .querySelector('meta[name="server-url"]')
@@ -16,6 +17,7 @@ const slotsEl = document.getElementById("slots");
 const resetEl = document.getElementById("slot-reset");
 const bboxToggleEl = document.getElementById("bbox-toggle");
 const framesToggleEl = document.getElementById("frames-toggle");
+const exportGlbEl = document.getElementById("export-glb");
 const assetsEl = document.getElementById("assets");
 const assetsBodyEl = document.getElementById("assets-body");
 const assetsCountEl = document.getElementById("assets-count");
@@ -1168,6 +1170,42 @@ resetEl.addEventListener("click", () => {
 
 document.getElementById("zoom-in").addEventListener("click", () => _dolly(0.8));
 document.getElementById("zoom-out").addEventListener("click", () => _dolly(1.25));
+
+// --- GLB export --------------------------------------------------------------
+
+exportGlbEl.addEventListener("click", async () => {
+  if (modelsById.size === 0) return;
+  exportGlbEl.disabled = true;
+  exportGlbEl.textContent = "exporting…";
+  try {
+    // Temporarily force all models visible so hidden frames are included.
+    const wasHidden = [];
+    sceneRoot.traverse((obj) => {
+      if (!obj.visible) {
+        wasHidden.push(obj);
+        obj.visible = true;
+      }
+    });
+
+    const exporter = new GLTFExporter();
+    const glb = await exporter.parseAsync(sceneRoot, { binary: true });
+
+    for (const obj of wasHidden) obj.visible = false;
+
+    const blob = new Blob([glb], { type: "model/gltf-binary" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${currentSlotId ?? "scene"}.glb`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    appendEvent({ kind: "run.error", message: `GLB export failed: ${e.message}` });
+  } finally {
+    exportGlbEl.disabled = false;
+    exportGlbEl.textContent = "export .glb";
+  }
+});
 
 // Boot: load slot list, pick the remembered slot (or the first), subscribe.
 (async () => {
