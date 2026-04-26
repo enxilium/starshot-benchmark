@@ -98,6 +98,47 @@ def _render_proxy_shape(p: ProxyShape | None) -> str:
     return p.value if p is not None else "BOX"
 
 
+# Shared anti-ephemera guidance injected into every prompt that authors
+# scene content (zone plans, zone decomposition, object decomposition,
+# next-object polish). The downstream text-to-3D model produces solid
+# meshes; gaseous, volumetric, or luminous phenomena render as garbage
+# blobs that drag the whole scene down. Centralised here so the
+# vocabulary of forbidden phenomena stays consistent across steps.
+NO_EPHEMERA_DOC = """\
+NO EPHEMERA. The downstream renderer produces SOLID, OPAQUE, BOUNDED \
+3D meshes — it cannot represent gases, plasmas, particulate clouds, \
+volumetric light, or any phenomenon that lacks a hard surface. Naming \
+such phenomena as features, anchors, plan elements, or ambient fill \
+produces deformed mesh blobs that visibly tank the scene. Do NOT \
+introduce, plan, enumerate, or describe any of the following as \
+things the scene must depict:
+
+  * GASES & VAPOURS — fog, mist, haze, smoke, steam, vapour, smog, \
+    exhaust plumes, dust clouds, pollen clouds, sandstorms, snow \
+    flurries in the air, falling rain or snow as discrete particles.
+  * CLOUDS & SKY VOLUMES — clouds, nebulae, gas giants' atmospheres, \
+    aurora curtains, rainbows, sunbeams / god rays, light shafts.
+  * PLASMAS & ENERGY — lightning bolts, electrical arcs, plasma \
+    discharges, fire flames as freestanding objects, sparks, embers \
+    in flight, magical glows, force fields, beams of light, laser \
+    beams, comet tails, meteor trails, contrails.
+  * LIQUIDS IN MOTION — splashes, sprays, waterfalls as freestanding \
+    objects, fountains' water arcs, pouring streams, ripples.
+
+You MAY still IMPLY these phenomena through tangible, solid \
+consequences that DO have hard surfaces: wet flagstones instead of \
+rain, scorched and split bark instead of lightning, soot stains and \
+charred timbers instead of smoke, a frost crust instead of fog, \
+puddles and damp moss instead of drizzle, a fire pit with glowing \
+embers (a solid bowl of coals) instead of freestanding flames, a \
+chimney instead of a smoke plume. Atmosphere is conveyed by what the \
+weather has DONE to solid surfaces, not by depicting the weather \
+itself. A flat-water surface (a pond, a puddle, a lake skin) IS \
+allowed because it is a bounded plane; freestanding water in motion \
+is not.\
+"""
+
+
 # ---------- Step 1: zone plan (high-level authoring; runs for every zone) ---
 
 
@@ -105,7 +146,8 @@ class ZonePlanOutput(BaseModel):
     plan: str
 
 
-SYSTEM_ZONE_PLAN = """\
+SYSTEM_ZONE_PLAN = (
+    """\
 You are authoring the HIGH-LEVEL PLAN for a region of a 3D scene \
 being built for StarshotBench — a head-to-head LLM benchmark where \
 your scene is rendered and judged against another LLM's rendering of \
@@ -186,6 +228,12 @@ sentences, that:
     handles those.
 </what_NOT_to_write>
 
+<no_ephemera>
+"""
+    + NO_EPHEMERA_DOC
+    + """
+</no_ephemera>
+
 <inputs>
   * The region being planned: its id and prompt.
   * The ANCESTOR CHAIN — every region above this one in the tree, \
@@ -204,6 +252,7 @@ sentences, that:
 Respond with ONE JSON object matching the schema. The `plan` field \
 holds the paragraph. No prose, no markdown, no code fences.\
 """
+)
 
 
 def render_zone_plan(
@@ -217,23 +266,16 @@ def render_zone_plan(
     excluding the zone itself. Empty for the root.
     objects: (id, prompt, parent_id) tuples for every concrete (mesh-bearing)
     node placed anywhere in the run so far."""
-    zone_block = (
-        f"ZONE_ID (being planned): {zone_id!r}\n"
-        f"Zone prompt: {zone_prompt!r}"
-    )
+    zone_block = f"ZONE_ID (being planned): {zone_id!r}\nZone prompt: {zone_prompt!r}"
     if ancestors:
         ancestor_block = "\n".join(
-            f"  - id={aid!r}\n"
-            f"    prompt: {aprompt}\n"
-            f"    plan: {aplan}"
-            for aid, aprompt, aplan in ancestors
+            f"  - id={aid!r}\n    prompt: {aprompt}\n    plan: {aplan}" for aid, aprompt, aplan in ancestors
         )
     else:
         ancestor_block = "  (none — this zone is the root)"
     if objects:
         obj_block = "\n".join(
-            f"  - id={oid!r} parent={oparent!r}: {oprompt}"
-            for oid, oprompt, oparent in objects
+            f"  - id={oid!r} parent={oparent!r}: {oprompt}" for oid, oprompt, oparent in objects
         )
     else:
         obj_block = "  (none — no concrete objects placed yet)"
@@ -333,7 +375,8 @@ class ZoneDecomposeOutput(BaseModel):
     children: list[ChildNodeSpec] = Field(default_factory=list)
 
 
-SYSTEM_ZONE_DECOMPOSE = """\
+SYSTEM_ZONE_DECOMPOSE = (
+    """\
 You are deciding the STRUCTURE of a zone in a 3D scene built for \
 StarshotBench. The zone's HIGH-LEVEL PLAN was already authored by the \
 upstream ZONE PLAN step and is shown to you in the inputs as the ZONE \
@@ -434,7 +477,9 @@ A zone is NEVER any of the following:
     atomic zone as individual objects, not as a subtree of zones.
   * A SURFACE or connective medium — the water skin of a pond, the \
     floor of a plaza, the sky, the asphalt of a street, a patch of \
-    mist. Same rule: not a zone.
+    mist, a bank of fog, a cloud layer. Same rule: not a zone — and \
+    gaseous/atmospheric media in particular are NEVER scene content \
+    (see NO EPHEMERA below).
   * A BAND, RING, CORE, FRINGE, or REGION of something homogeneous, \
     defined only by density or proximity — dense core vs. sparse \
     edge, inner ring vs. outer ring, north half vs. south half. \
@@ -549,11 +594,20 @@ step resolves each child's bbox from its relationships and prompt.
 </output>
 
 <proxy_shape>
-""" + PROXY_SHAPE_DOC + """
+"""
+    + PROXY_SHAPE_DOC
+    + """
 </proxy_shape>
+
+<no_ephemera>
+"""
+    + NO_EPHEMERA_DOC
+    + """
+</no_ephemera>
 
 Respond with ONE JSON object matching the schema. No prose, no markdown, no code fences.\
 """
+)
 
 
 def render_zone_decompose(
@@ -582,26 +636,20 @@ def render_zone_decompose(
     )
     if ancestors:
         ancestor_block = "\n".join(
-            f"  - id={aid!r}\n"
-            f"    prompt: {aprompt}\n"
-            f"    plan: {aplan}"
-            for aid, aprompt, aplan in ancestors
+            f"  - id={aid!r}\n    prompt: {aprompt}\n    plan: {aplan}" for aid, aprompt, aplan in ancestors
         )
     else:
         ancestor_block = "  (none — this zone is the root)"
     if prior_zones:
         prior_block = "\n".join(
-            f"  - id={zid!r} parent={zparent!r}\n"
-            f"    prompt: {zprompt}\n"
-            f"    plan: {zplan}"
+            f"  - id={zid!r} parent={zparent!r}\n    prompt: {zprompt}\n    plan: {zplan}"
             for zid, zprompt, zplan, zparent in prior_zones
         )
     else:
         prior_block = "  (none)"
     if objects:
         obj_block = "\n".join(
-            f"  - id={oid!r} parent={oparent!r}: {oprompt}"
-            for oid, oprompt, oparent in objects
+            f"  - id={oid!r} parent={oparent!r}: {oprompt}" for oid, oprompt, oparent in objects
         )
     else:
         obj_block = "  (none — no concrete objects placed yet)"
@@ -633,7 +681,8 @@ class BboxBatchOutput(BaseModel):
     assignments: list[BboxAssignment] = Field(default_factory=list)
 
 
-SYSTEM_ZONE_BBOX_BATCH = """\
+SYSTEM_ZONE_BBOX_BATCH = (
+    """\
 You are a constraint solver. Place ALL sibling child ZONES inside a \
 parent zone in one shot, deriving each child's axis-aligned bounding \
 box from the given inputs (parent bbox, child specs, relationships). \
@@ -684,11 +733,14 @@ expansion direction. Emit exactly one assignment per requested child \
 id, no extras, no omissions.
 
 <proxy_shape>
-""" + PROXY_SHAPE_DOC + """
+"""
+    + PROXY_SHAPE_DOC
+    + """
 </proxy_shape>
 
 Respond with ONE JSON object matching the schema. No prose, no markdown, no code fences.\
 """
+)
 
 
 def render_zone_bbox_batch(
@@ -704,8 +756,7 @@ def render_zone_bbox_batch(
         f"    relationships:\n"
         + (
             "\n".join(
-                f"      * target={r.target!r} kind={r.kind.value} "
-                f"reference_point={r.reference_point.value}"
+                f"      * target={r.target!r} kind={r.kind.value} reference_point={r.reference_point.value}"
                 for r in c.relationships
             )
             or "      (none)"
@@ -741,7 +792,8 @@ class ObjectDecompOutput(BaseModel):
     objects: list[ObjectSpec] = Field(default_factory=list)
 
 
-SYSTEM_OBJECT_DECOMP = """\
+SYSTEM_OBJECT_DECOMP = (
+    """\
 You are enumerating the OBJECTS that populate a 3D scene zone inside \
 StarshotBench — a head-to-head competitive benchmark where your scene \
 will be rendered and judged against another LLM's rendering of the \
@@ -818,10 +870,13 @@ You operate in one of three MODES:
 * NEGATIVE-SPACE mode — you are filling the AMBIENT, CONNECTIVE, \
   INTERSTITIAL space of the scene (or a zone) with drifting, background, \
   or distribution-style content that doesn't belong to any specific \
-  zone: lilypads drifting across swamp water between islands, clouds \
-  above a cityscape, grass tufts scattered over a meadow, floating \
-  debris across open water, mist pooling in low valleys, loose paper \
-  blowing across a plaza. This mode runs over the scene root (or \
+  zone: lilypads drifting across swamp water between islands, grass \
+  tufts scattered over a meadow, floating logs and driftwood across \
+  open water, scattered stones across a plain, loose paper blowing \
+  across a plaza. Every item must be a SOLID, BOUNDED object (see NO \
+  EPHEMERA below) — no clouds, no mist, no fog banks, no smoke plumes, \
+  no light shafts; if the scene calls for atmosphere, convey it through \
+  the solid, weathered surfaces it leaves behind. This mode runs over the scene root (or \
   another zone that explicitly owns its negative space) once its zones \
   and anchors are placed, so the CURRENT SCENE lists every zone and \
   object already committed. Enumerate the ambient/drifting objects that \
@@ -914,11 +969,20 @@ object's bbox.
 </per_object_fields>
 
 <proxy_shape>
-""" + PROXY_SHAPE_DOC + """
+"""
+    + PROXY_SHAPE_DOC
+    + """
 </proxy_shape>
+
+<no_ephemera>
+"""
+    + NO_EPHEMERA_DOC
+    + """
+</no_ephemera>
 
 Respond with ONE JSON object matching the schema. No prose, no markdown, no code fences.\
 """
+)
 
 
 def render_object_decomp(
@@ -984,7 +1048,8 @@ def render_object_decomp(
 # ---------- Step 6: object bbox resolution ----------------------------------
 
 
-SYSTEM_OBJECT_BBOX_BATCH = """\
+SYSTEM_OBJECT_BBOX_BATCH = (
+    """\
 You are a constraint solver. Place ALL objects for a scene ZONE in one \
 shot, deriving each object's axis-aligned bounding box from the given \
 inputs (zone bbox, object specs, relationships, peer prompts/bboxes). \
@@ -1055,11 +1120,14 @@ Signed `dimensions` from an `origin` vertex. Emit exactly one \
 assignment per requested object id — no extras, no omissions.
 
 <proxy_shape>
-""" + PROXY_SHAPE_DOC + """
+"""
+    + PROXY_SHAPE_DOC
+    + """
 </proxy_shape>
 
 Respond with ONE JSON object matching the schema. No prose, no markdown, no code fences.\
 """
+)
 
 
 def render_object_bbox_batch(
@@ -1089,8 +1157,7 @@ def render_object_bbox_batch(
         f"    relationships:\n"
         + (
             "\n".join(
-                f"      * target={r.target!r} kind={r.kind.value} "
-                f"reference_point={r.reference_point.value}"
+                f"      * target={r.target!r} kind={r.kind.value} reference_point={r.reference_point.value}"
                 for r in o.relationships
             )
             or "      (none)"
@@ -1115,7 +1182,8 @@ class NextObjectOutput(BaseModel):
     object: ObjectSpec | None = None
 
 
-SYSTEM_NEXT_OBJECT = """\
+SYSTEM_NEXT_OBJECT = (
+    """\
 You are iteratively refining a 3D scene zone inside StarshotBench — a \
 head-to-head competitive benchmark where your scene is rendered and \
 judged against another LLM's rendering of the same user prompt. The \
@@ -1185,8 +1253,15 @@ HEMISPHERE for a mound) — omit it otherwise. See the emitter's \
 decomposition schema for the full vocabulary; the value set is the \
 same.
 
+<no_ephemera>
+"""
+    + NO_EPHEMERA_DOC
+    + """
+</no_ephemera>
+
 Respond with ONE JSON object matching the schema. No prose, no markdown, no code fences.\
 """
+)
 
 
 class ImagePromptOutput(BaseModel):
@@ -1202,15 +1277,18 @@ output is the SUBJECT of the sentence and nothing more.
 The user message will show you the EXACT wrapper your phrase is \
 slotted into, with a `<<<SUBJECT>>>` marker where your output goes. \
 Read it before writing. Anything the wrapper already says — \
-"orthographic front view", the hitbox shape, the white background, \
-"capture the entire model" — must NOT appear in your phrase, or it \
-will read twice.
+"orthographic front view", the white background, \
+"capture the entire model", the explicit object dimensions — must \
+NOT appear in your phrase, or it will read twice. You should, however, \
+use descriptive language, e.g. "tall" or "wide".
 
 Inputs you receive:
   * The original object prompt.
   * The bounding box dimensions in meters (width +X, height +Y, \
     depth +Z) — use them to pick proportion-sensitive adjectives \
-    ("long", "tall", "squat") only when natural.
+    ("long", "tall", "squat") only when natural. The wrapper also \
+    emits the exact dimensions to the renderer, so you do NOT need \
+    to encode them in your phrase.
   * The proxy_shape — already encoded into the wrapper's hitbox \
     language; don't repeat it in your phrase.
   * The full image-prompt template with the `<<<SUBJECT>>>` slot \
@@ -1232,8 +1310,6 @@ Rules for the phrase:
     intrinsic features of the object itself.
   * NO camera, framing, backdrop, lighting, or rendering instructions \
     — the wrapper handles all of that.
-  * NO mention of orthographic, hitbox, prism, rectangle, or any \
-    shape language — the wrapper handles silhouette too.
 
 Respond with ONE JSON object matching the schema. The `prompt` field \
 holds the noun phrase only.\
@@ -1258,19 +1334,33 @@ def _article(word: str) -> str:
     return "an" if word[:1].lower() in "aeiou" else "a"
 
 
-def wrap_image_prompt(description: str, proxy_shape: ProxyShape | None) -> str:
+def wrap_image_prompt(
+    description: str,
+    proxy_shape: ProxyShape | None,
+    dimensions: tuple[float, float, float] | None = None,
+) -> str:
     """Slot the LLM's noun phrase into the fixed image-generation
-    template. Hitbox + silhouette terms are picked from the proxy."""
+    template. Hitbox + silhouette terms are picked from the proxy.
+    If `dimensions` is provided (width, height, depth in metres) it is
+    appended as a closing sentence so the renderer sees the object's
+    real-world extents."""
     hitbox, silhouette = _HITBOX_TERMS[proxy_shape]
-    return (
-        f"Generate a realistic orthographic front view of {description} "
+    base = (
+        f"Generate a direct, perfect orthographic front view of {description} "
         f"that roughly can be captured within {_article(hitbox)} {hitbox} "
         "hitbox without bending or deforming the object's natural "
         f"proportions. The object should not fully be in {_article(silhouette)} "
-        f"{silhouette} shape unless it is naturally that shape. Prioritize "
-        "realism over confinement to the hitbox shape. Render against a "
-        "clean, empty white background with no other objects or graphics. "
-        "Capture the entire model in the image."
+        f"{silhouette} shape unless its dimensions and nature dictate it is naturally that shape. Prioritize "
+        "realism over confinement to the hitbox shape."
+    )
+    if dimensions is None:
+        return base
+    w, h, d = dimensions
+    return (
+        f"{base} The object's dimensions are exactly "
+        f"{w:.2f}m by {h:.2f}m by {d:.2f}m (width by height by depth)."
+        "Capture the entire model in the image. Render against a "
+        "clean, empty white background with no other objects or graphics."
     )
 
 
@@ -1282,15 +1372,10 @@ def render_image_prompt(
     prior_prompts: list[str],
 ) -> str:
     w, h, d = bbox.size
-    template_preview = wrap_image_prompt(_SUBJECT_SLOT, proxy_shape)
+    template_preview = wrap_image_prompt(_SUBJECT_SLOT, proxy_shape, (w, h, d))
     if prior_prompts:
-        prior_lines = "\n".join(
-            f"  {i + 1}. {p}" for i, p in enumerate(prior_prompts)
-        )
-        prior_block = (
-            f"Prior subject phrases in this scene ({len(prior_prompts)} "
-            f"total):\n{prior_lines}"
-        )
+        prior_lines = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(prior_prompts))
+        prior_block = f"Prior subject phrases in this scene ({len(prior_prompts)} total):\n{prior_lines}"
     else:
         prior_block = (
             "Prior subject phrases in this scene: (none — this is the "
@@ -1327,8 +1412,7 @@ def render_next_object(
     )
     if prior_attempts:
         attempt_lines = "\n".join(
-            f"  attempt {i}: emitted {spec.model_dump_json()}\n"
-            f"             rejected: {reason}"
+            f"  attempt {i}: emitted {spec.model_dump_json()}\n             rejected: {reason}"
             for i, (spec, reason) in enumerate(prior_attempts)
         )
         retry_block = (

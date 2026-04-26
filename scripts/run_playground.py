@@ -81,7 +81,7 @@ def main() -> int:
     if "FAL_KEY" not in os.environ and not (SERVER_DIR / ".env").exists():
         print(
             "[playground] FAL_KEY not set and server/.env missing — "
-            "Fal calls will fail with a 401",
+            "fal calls will fail with an auth error",
             file=sys.stderr,
         )
 

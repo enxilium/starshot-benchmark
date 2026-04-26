@@ -173,6 +173,37 @@ async def _resolve_and_generate(
     runs_dir: Path,
     run_id: str,
 ) -> list[Node]:
+    # Run-wide dedup. The LLM occasionally emits the same id twice in one
+    # decomposition (e.g. duplicate floor slabs in encapsulating mode), and
+    # later recursion levels can re-surface an id already in flight. Drop
+    # any spec whose id collides with an already-admitted id, an already-
+    # placed node, or an earlier spec in this same call. Without this guard
+    # we re-bill Banana + Trellis for every duplicate, since the artifact
+    # cache key is the node id but the cache lookup races against
+    # concurrent submissions.
+    admitted = _admitted_ids.setdefault(run_id, set())
+    placed_ids = {n.id for n in all_nodes}
+    deduped: list[ObjectSpec] = []
+    seen_in_call: set[str] = set()
+    for s in specs:
+        if s.id in seen_in_call or s.id in admitted or s.id in placed_ids:
+            logging.log(
+                "generation.dedup_drop",
+                zone=zone.id, scenario=scenario, id=s.id,
+                reason=(
+                    "duplicate_in_call" if s.id in seen_in_call
+                    else "already_placed" if s.id in placed_ids
+                    else "already_in_flight"
+                ),
+            )
+            continue
+        seen_in_call.add(s.id)
+        deduped.append(s)
+    if not deduped:
+        return []
+    admitted.update(seen_in_call)
+    specs = deduped
+
     out = await llm.call_llm(
         system=SYSTEM_OBJECT_BBOX_BATCH,
         user=render_object_bbox_batch(
@@ -236,10 +267,19 @@ async def _build_image_prompt(
         ),
         output_schema=ImagePromptOutput,
     )
-    return wrap_image_prompt(out.prompt, proxy_shape)
+    return wrap_image_prompt(out.prompt, proxy_shape, bbox.size)
 
 
 _pending: dict[str, list[asyncio.Task[None]]] = {}
+
+# Run-scoped set of every id that has been admitted into _resolve_and_generate
+# for this run. Populated *synchronously* before the bbox-resolution LLM call,
+# so concurrent specs (within or across decomposition steps) can't both pass
+# the dedup check and race into Banana+Trellis. The artifact cache catches
+# *most* repeats, but two specs that submit before either has logged a
+# `cache.artifact` will both miss the cache and double-bill — this guard
+# closes that window.
+_admitted_ids: dict[str, set[str]] = {}
 
 
 async def _generate_one(
@@ -313,6 +353,7 @@ async def await_pending(run_id: str) -> None:
     Errors inside individual tasks were logged + swallowed by `_generate_one`,
     so this gather only waits — it never raises."""
     tasks = _pending.pop(run_id, [])
+    _admitted_ids.pop(run_id, None)
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -320,6 +361,7 @@ async def await_pending(run_id: str) -> None:
 def cancel_pending(run_id: str) -> None:
     """Cancel any in-flight mesh tasks for this run. Called when the run
     itself is being torn down (cancellation or fatal error)."""
+    _admitted_ids.pop(run_id, None)
     for t in _pending.pop(run_id, []):
         t.cancel()
 

@@ -3,6 +3,15 @@ revision = 3
 requires-python = ">=3.12"
 
 [[package]]
+name = "aiofiles"
+version = "25.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/c3/534eac40372d8ee36ef40df62ec129bee4fdb5ad9706e58a29be53b2c970/aiofiles-25.1.0.tar.gz", hash = "sha256:a8d728f0a29de45dc521f18f07297428d56992a742f0cd2701ba86e44d23d5b2", size = 46354, upload-time = "2025-10-09T20:51:04.358Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/8a/340a1555ae33d7354dbca4faa54948d76d89a27ceef032c8c3bc661d003e/aiofiles-25.1.0-py3-none-any.whl", hash = "sha256:abe311e527c862958650f9438e859c1fa7568a141b22abcd015e120e86a85695", size = 14668, upload-time = "2025-10-09T20:51:03.174Z" },
+]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -65,7 +74,7 @@ wheels = [
 
 [[package]]
 name = "fal-client"
-version = "0.13.2"
+version = "0.14.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -73,9 +82,9 @@ dependencies = [
     { name = "msgpack" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c1/c5/092950a61034ad8bc6fb50be63f9d749eb9129cbada93c95b54e3104a782/fal_client-0.13.2.tar.gz", hash = "sha256:d543d4ff49f27d84bc03852bd1c6aa343604e07d5ed31b9df78d625e010308cb", size = 32183, upload-time = "2026-03-24T16:33:42.866Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a7/c4/a3d47a94a954f57ecde6b5c15325eb2144e680cf4cd6e10d05e45b8c7ac7/fal_client-0.14.1.tar.gz", hash = "sha256:d62b1ff118e253de90484d5be27b953e2de57760ef5d7311e9ab42937e318b84", size = 35042, upload-time = "2026-04-24T16:50:19.26Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/6f/1d9c1a4e89b48bbb5bdd5d7b78717f9e5635fb7bf6ea3cbdbeb17a0c77f2/fal_client-0.13.2-py3-none-any.whl", hash = "sha256:1f26efc21067de136026086f44aa32655e457a9a3b67fb20617bba930953d553", size = 19739, upload-time = "2026-03-24T16:33:41.543Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/d7/b65e59b15e18a02f559bb263d41e933570415ab1f3327887e64be8e14cdf/fal_client-0.14.1-py3-none-any.whl", hash = "sha256:6881645080cd4f828ba50abfde3d0e2d18b4d10d1bc2e1fb4054a067fe8f1e87", size = 21381, upload-time = "2026-04-24T16:50:18.097Z" },
 ]
 
 [[package]]
@@ -612,6 +621,21 @@ wheels = [
 ]
 
 [[package]]
+name = "runware"
+version = "0.5.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiofiles" },
+    { name = "httpx" },
+    { name = "python-dotenv" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/79/2d/8d5a671b91d9ff86647ce62c16e6b6537dd015e29234316c866113a1cbab/runware-0.5.9.tar.gz", hash = "sha256:1e9da19f9d3a64caa62c455ce55e6502a64a62d6c60597b56f4358d5e1e0eb79", size = 83772, upload-time = "2026-04-23T13:40:25.984Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f0/8a/5429b064fcb2be3ff3924781a8feb7de61e0475648c9948869e72a12d41e/runware-0.5.9-py3-none-any.whl", hash = "sha256:b53d03bf585c3628539bdb7044ba0155428cfd35714910e3eac5646f6652e7af", size = 63582, upload-time = "2026-04-23T13:40:24.232Z" },
+]
+
+[[package]]
 name = "starlette"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -631,12 +655,14 @@ source = { virtual = "." }
 dependencies = [
     { name = "fal-client" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "numpy" },
     { name = "openrouter" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "rich" },
+    { name = "runware" },
     { name = "trimesh" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -651,12 +677,14 @@ dev = [
 requires-dist = [
     { name = "fal-client", specifier = ">=0.5" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "openrouter", specifier = ">=0.9.1" },
     { name = "pillow", specifier = ">=11.0" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rich", specifier = ">=13.9" },
+    { name = "runware", specifier = ">=0.5.9" },
     { name = "trimesh", specifier = ">=4.5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]

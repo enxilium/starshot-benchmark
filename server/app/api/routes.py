@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from app.core.slots import DEFAULT_MODEL, SLOTS, SLOTS_BY_ID, Slot
 from app.pipeline import divider, generation
-from app.services import llm
+from app.services import llm, threed
 from app.utils import logging as rlog
 from app.utils.logging import SlotLog
 
@@ -61,6 +61,7 @@ def create_app() -> FastAPI:
             for task in list(_tasks.values()):
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+            await threed.disconnect_runware()
 
     app = FastAPI(
         docs_url=None,
@@ -223,7 +224,7 @@ async def _run(slot_id: str) -> None:
     except asyncio.CancelledError:
         generation.cancel_pending(slot_id)
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         generation.cancel_pending(slot_id)
         # OpenRouter SDK errors only stringify to the top-level "Provider
         # returned error" message; the actually useful detail (upstream

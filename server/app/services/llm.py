@@ -8,13 +8,25 @@ Up to 4 resamples on parse / validation failures.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sys
 
 from openrouter import OpenRouter
+from openrouter.errors import OpenRouterError
 from pydantic import BaseModel, ValidationError
 
 from app.utils import cache, logging
+
+# Lift Python 3.11+'s 4300-digit ceiling on int<->str conversion.
+# When an LLM hallucinates a runaway numeric literal into a structured-
+# output JSON field, `json.loads` raises ValueError("Exceeds the limit")
+# before pydantic ever sees the value, which means we burn a retry
+# without a useful diagnostic. Letting json parse the giant int through
+# moves the rejection into pydantic, where ValidationError surfaces the
+# bad field name instead of a cryptic conversion error.
+sys.set_int_max_str_digits(0)
 
 _current_model: str | None = None
 
@@ -42,29 +54,43 @@ async def call_llm[T: BaseModel](
     if hit is not None:
         return output_schema.model_validate(hit)
 
-    for attempt in range(4):
-        async with OpenRouter(
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            timeout_ms=180_000,
-        ) as client:
-            response = await client.chat.send_async(
-                model=_current_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": output_schema.__name__,
-                        "strict": True,
-                        "schema_": _normalize_schema(output_schema.model_json_schema()),
-                    },
-                },
-                reasoning={"effort": "xhigh"},
-            )
+    # Two independent budgets:
+    #   * `parse_attempt` — JSON-decode / Pydantic-validation failures.
+    #     The model misbehaved; resampling fixes it. 4 tries.
+    #   * `transport_attempt` — provider returned a non-success body
+    #     (Anthropic 503 "Overloaded", upstream timeouts, etc.) which the
+    #     SDK surfaces as OpenRouterError / ResponseValidationError. The
+    #     model never saw the request, so this isn't "the LLM was wrong" —
+    #     it's a flap. Larger budget + longer backoff so a multi-second
+    #     provider hiccup doesn't fail the run.
+    parse_attempt = 0
+    transport_attempt = 0
+    PARSE_MAX = 4
+    TRANSPORT_MAX = 8
+    TRANSPORT_BACKOFF = [2, 4, 8, 16, 30, 30, 30, 30]
+    while True:
         content: object = None
         try:
+            async with OpenRouter(
+                api_key=os.environ["OPENROUTER_API_KEY"],
+                timeout_ms=180_000,
+            ) as client:
+                response = await client.chat.send_async(
+                    model=_current_model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": output_schema.__name__,
+                            "strict": True,
+                            "schema_": _normalize_schema(output_schema.model_json_schema()),
+                        },
+                    },
+                    reasoning={"effort": "xhigh"},
+                )
             message = response.choices[0].message
             content = message.content
             args = json.loads(content) if isinstance(content, str) else content
@@ -78,20 +104,36 @@ async def call_llm[T: BaseModel](
             )
             return validated
         except json.JSONDecodeError as e:
+            final = parse_attempt >= PARSE_MAX - 1
             logging.log(
                 "llm.json_decode_error",
                 reason=f"JSONDecodeError: {e}",
-                attempt=attempt,
-                final=attempt == 3,
+                attempt=parse_attempt,
+                final=final,
                 content=content if isinstance(content, str) else repr(content),
             )
-            if attempt == 3:
+            if final:
                 raise
+            parse_attempt += 1
+        except OpenRouterError as e:
+            if transport_attempt >= TRANSPORT_MAX - 1:
+                raise
+            backoff = TRANSPORT_BACKOFF[
+                min(transport_attempt, len(TRANSPORT_BACKOFF) - 1)
+            ]
+            logging.log(
+                "llm.transport_retry",
+                reason=f"{type(e).__name__}: {str(e)[:200]}",
+                attempt=transport_attempt,
+                backoff_s=backoff,
+            )
+            await asyncio.sleep(backoff)
+            transport_attempt += 1
         except (ValidationError, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
-            if attempt == 3:
+            if parse_attempt >= PARSE_MAX - 1:
                 raise
             logging.log("llm.retry", reason=f"{type(e).__name__}: {str(e)[:160]}")
-    raise AssertionError("unreachable")
+            parse_attempt += 1
 
 
 def _normalize_schema(schema: object) -> object:
