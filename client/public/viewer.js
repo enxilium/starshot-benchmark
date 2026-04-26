@@ -26,6 +26,9 @@ const treeBodyEl = document.getElementById("tree-body");
 const treeHeaderEl = document.getElementById("tree-header");
 const treeToggleEl = document.getElementById("tree-toggle");
 const treeActiveEl = document.getElementById("tree-active");
+const treeSearchEl = document.getElementById("tree-search");
+const treeSearchClearEl = document.getElementById("tree-search-clear");
+const treeSearchCountEl = document.getElementById("tree-search-count");
 
 // --- log panel --------------------------------------------------------------
 
@@ -270,13 +273,15 @@ function truncate(s, n = 60) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
-function renderTreeNode(id) {
+function renderTreeNode(id, ctx) {
   const node = treeNodes.get(id);
   if (!node) return null;
+  if (ctx && !ctx.visible.has(id)) return null;
   const wrap = document.createElement("div");
   const classes = ["tree-node"];
   if (id === treeActiveId) classes.push("active");
   if (id === selectedBboxId) classes.push("selected");
+  if (ctx && ctx.matches.has(id)) classes.push("matched", "match-highlight");
   wrap.className = classes.join(" ");
   wrap.dataset.id = id;
 
@@ -311,29 +316,132 @@ function renderTreeNode(id) {
     const kidsEl = document.createElement("div");
     kidsEl.className = "tree-children";
     for (const cid of childIds) {
-      const cEl = renderTreeNode(cid);
+      const cEl = renderTreeNode(cid, ctx);
       if (cEl) kidsEl.appendChild(cEl);
     }
-    wrap.appendChild(kidsEl);
+    if (kidsEl.childNodes.length > 0) wrap.appendChild(kidsEl);
   }
   return wrap;
 }
 
+let treeSearchQuery = "";
+// Index of the currently-focused match within `orderedMatches`. Repeated
+// Enter advances; Shift+Enter goes back. -1 = nothing selected yet for
+// this query (next Enter selects [0]).
+let treeMatchIndex = -1;
+
+// A node is a `match` if its id or prompt contains the query.
+// `visible` = matches ∪ ancestors-of-matches ∪ descendants-of-matches.
+// Returns null when no query (everything visible, no match highlighting).
+function computeTreeFilter() {
+  const q = treeSearchQuery.trim().toLowerCase();
+  if (!q) return null;
+  const matches = new Set();
+  for (const [id, node] of treeNodes) {
+    const idHit = id.toLowerCase().includes(q);
+    const promptHit = (node.prompt ?? "").toLowerCase().includes(q);
+    if (idHit || promptHit) matches.add(id);
+  }
+  const visible = new Set(matches);
+  // Walk ancestors up.
+  for (const id of matches) {
+    let cur = treeNodes.get(id);
+    while (cur && cur.parentId) {
+      if (visible.has(cur.parentId)) break;
+      visible.add(cur.parentId);
+      cur = treeNodes.get(cur.parentId);
+    }
+  }
+  // Walk descendants down so users can see the matched subtree expanded.
+  const stack = [...matches];
+  while (stack.length) {
+    const id = stack.pop();
+    const kids = treeChildren.get(id) ?? [];
+    for (const cid of kids) {
+      if (!visible.has(cid)) {
+        visible.add(cid);
+        stack.push(cid);
+      }
+    }
+  }
+  return { matches, visible };
+}
+
+// Match order for "Enter selects first match" — use insertion order so
+// the first match in the rendered tree is what gets selected.
+function orderedMatches(filter) {
+  if (!filter) return [];
+  const sorted = [...treeNodes.values()]
+    .filter((n) => filter.matches.has(n.id))
+    .sort((a, b) => a.order - b.order);
+  return sorted.map((n) => n.id);
+}
+
 function renderTree() {
   treeBodyEl.innerHTML = "";
+  const filter = computeTreeFilter();
   if (treeRootId !== null) {
-    const el = renderTreeNode(treeRootId);
+    const el = renderTreeNode(treeRootId, filter);
     if (el) treeBodyEl.appendChild(el);
   }
   if (treeActiveId !== null) {
     const n = treeNodes.get(treeActiveId);
     if (n) treeActiveEl.textContent = `${n.phase} · ${n.id}`;
   }
+  if (filter) {
+    const n = filter.matches.size;
+    if (n === 0) {
+      treeSearchCountEl.textContent = "no matches";
+    } else if (treeMatchIndex >= 0) {
+      treeSearchCountEl.textContent = `${(treeMatchIndex % n) + 1}/${n}`;
+    } else {
+      treeSearchCountEl.textContent = `${n} match${n === 1 ? "" : "es"}`;
+    }
+  } else {
+    treeSearchCountEl.textContent = "";
+  }
 }
 
 treeHeaderEl.addEventListener("click", () => {
   const collapsed = treeEl.classList.toggle("collapsed");
   treeToggleEl.textContent = collapsed ? "▸" : "▾";
+});
+
+treeSearchEl.addEventListener("input", () => {
+  treeSearchQuery = treeSearchEl.value;
+  treeSearchClearEl.classList.toggle("visible", treeSearchQuery.length > 0);
+  treeMatchIndex = -1;
+  renderTree();
+});
+
+treeSearchEl.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    const ordered = orderedMatches(computeTreeFilter());
+    if (ordered.length === 0) return;
+    if (treeMatchIndex < 0) {
+      treeMatchIndex = ev.shiftKey ? ordered.length - 1 : 0;
+    } else {
+      const delta = ev.shiftKey ? -1 : 1;
+      treeMatchIndex = (treeMatchIndex + delta + ordered.length) % ordered.length;
+    }
+    const target = ordered[treeMatchIndex];
+    // Bypass selectTreeNode's toggle behaviour — re-pressing Enter on the
+    // same node should cycle, not deselect.
+    if (selectedBboxId !== target) selectTreeNode(target);
+    const row = treeBodyEl.querySelector(`.tree-node[data-id="${CSS.escape(target)}"]`);
+    if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    renderTree();
+  } else if (ev.key === "Escape") {
+    treeSearchEl.value = "";
+    treeSearchEl.dispatchEvent(new Event("input"));
+  }
+});
+
+treeSearchClearEl.addEventListener("click", () => {
+  treeSearchEl.value = "";
+  treeSearchEl.dispatchEvent(new Event("input"));
+  treeSearchEl.focus();
 });
 
 // --- three.js scene ---------------------------------------------------------
@@ -674,6 +782,13 @@ function loadModel(event) {
 async function _loadModelNow(event, gen) {
   if (gen !== sceneGen) return;
   const absUrl = new URL(event.url, SERVER_URL).toString();
+  // Skip a re-load when this id already errored on the *same URL* during
+  // this scene generation. The server occasionally emits `model` more
+  // than once for one id (anchor completion loop, cached replay), and
+  // re-running GLTFLoader on a known-bad GLB just spams the same parse
+  // error. A new URL or a new sceneGen still goes through.
+  const prior = assets.get(event.id);
+  if (prior?.status === "error" && prior.modelUrl === event.url) return;
   upsertAsset(event.id, { modelUrl: event.url });
   try {
     const gltf = await loader.loadAsync(absUrl);

@@ -255,9 +255,69 @@
                 overflow: hidden;
                 text-overflow: ellipsis;
             }
+            #tree-search-row {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                padding: 4px 6px;
+                border-bottom: 1px solid #2a2d35;
+            }
+            #tree.collapsed #tree-search-row {
+                display: none;
+            }
+            #tree-search {
+                flex: 1;
+                min-width: 0;
+                padding: 3px 6px;
+                background: #0c0d10;
+                border: 1px solid #2a2d35;
+                border-radius: 3px;
+                color: #e6e6e6;
+                font: inherit;
+                font-size: 11px;
+            }
+            #tree-search:focus {
+                outline: none;
+                border-color: #4a8fd8;
+            }
+            #tree-search-clear {
+                width: 20px;
+                height: 20px;
+                padding: 0;
+                border-radius: 3px;
+                border: 1px solid #2a2d35;
+                background: #16181d;
+                color: #8a8f99;
+                font: inherit;
+                font-size: 14px;
+                line-height: 1;
+                cursor: pointer;
+                display: none;
+            }
+            #tree-search-clear.visible {
+                display: inline-block;
+            }
+            #tree-search-clear:hover {
+                color: #e6e6e6;
+                border-color: #4a8fd8;
+            }
+            #tree-search-count {
+                font-size: 10px;
+                color: #5a5e68;
+                min-width: 36px;
+                text-align: right;
+            }
             #tree-body {
                 overflow: auto;
                 padding: 6px 4px 6px 6px;
+            }
+            .tree-node.matched > .tree-row {
+                background: rgba(224, 194, 113, 0.18);
+                border-radius: 2px;
+            }
+            .tree-node.match-highlight > .tree-row .tree-id,
+            .tree-node.match-highlight > .tree-row .tree-prompt {
+                color: #e0c271;
             }
             .tree-node {
                 display: block;
@@ -495,6 +555,11 @@
                 <span>tree</span>
                 <span id="tree-active"></span>
                 <span id="tree-toggle">▾</span>
+            </div>
+            <div id="tree-search-row">
+                <input id="tree-search" type="text" placeholder="search id or prompt — Enter cycles matches (Shift+Enter back)" autocomplete="off" spellcheck="false" />
+                <button id="tree-search-clear" type="button" title="Clear search">×</button>
+                <span id="tree-search-count"></span>
             </div>
             <div id="tree-body"></div>
         </div>

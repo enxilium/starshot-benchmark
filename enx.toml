@@ -50,6 +50,10 @@ commands = [
 command = "uv run scripts/run_request.py"
 description = "Run test suite"
 
+[tasks.playground]
+command = "uv run scripts/run_playground.py"
+description = "Boot the prompt → Nano Banana → Trellis 2 dev playground"
+
 # [open] maps target name -> URL or shell command for `enx open <target>`.
 [open]
 repo = "https://github.com/enxilium/starshot-benchmark"
